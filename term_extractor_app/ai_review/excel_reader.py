@@ -34,7 +34,10 @@ def _sheet_columns(sheet: Any) -> list[dict[str, Any]]:
 
 
 def read_excel_headers(path: Path) -> dict[str, Any]:
-    workbook = load_workbook(path, read_only=True, data_only=True)
+    # Some files carry a stale worksheet dimension such as A1:D1501 even though
+    # later columns have real values. Normal mode recalculates the used range,
+    # while read-only mode trusts the stale dimension and can hide columns.
+    workbook = load_workbook(path, read_only=False, data_only=True)
     headers_by_sheet: dict[str, list[str]] = {}
     columns_by_sheet: dict[str, list[dict[str, Any]]] = {}
     ordered_headers: list[str] = []
@@ -137,8 +140,14 @@ def read_excel_items_by_mapping(path: Path, mapping: dict[str, Any], source_file
             info_columns = _normalize_info_columns(column_mapping.get("info_columns", []))
             source_label = get_column_letter(source_index + 1)
             target_label = get_column_letter(target_index + 1)
+            max_column = max(
+                [source_index, target_index, *[info_column["column"] for info_column in info_columns]]
+            ) + 1
 
-            for row_number, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            for row_number, row in enumerate(
+                sheet.iter_rows(min_row=2, max_col=max_column, values_only=True),
+                start=2,
+            ):
                 source_text = _cell_to_text(row[source_index]) if source_index < len(row) else ""
                 target_text = _cell_to_text(row[target_index]) if target_index < len(row) else ""
                 if not source_text and not target_text:

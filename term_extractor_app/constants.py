@@ -1,7 +1,7 @@
 """Application constants and default prompts for the WebUI pipeline."""
 
 APP_NAME = "译禾工具合集"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 CONFIG_VERSION = 6
 RUNTIME_CACHE_VERSION = 3
 UPDATE_REPOSITORY_OWNER = "willwong0908"
