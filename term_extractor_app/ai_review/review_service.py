@@ -12,7 +12,7 @@ from .directional_service import enabled_review_types, get_directional_template
 from .forbidden_service import check_forbidden_words, get_forbidden_template, parse_forbidden_words
 from .output_service import generate_review_excel
 from .prompt_service import get_prompt_template
-from .shared_provider import SharedProviderError, get_shared_ai_settings, review_chat
+from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings, review_chat
 from ..telemetry import infer_model_tier, track_event
 
 DEFAULT_DIRECTIONAL_SYSTEM_PROMPT = """你是专业翻译审校员。你的任务是按照用户指定的定向审校类型，检查译文相对于原文是否存在对应问题。
@@ -233,6 +233,101 @@ def get_review_issue_results(task_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def get_review_followup_messages(task_id: str, result_id: str) -> dict[str, Any]:
+    item = get_review_result_detail(task_id, result_id)
+    if item is None:
+        raise ReviewTaskError("问题条目不存在")
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, role, content, created_at
+            FROM review_followup_messages
+            WHERE task_id = ? AND result_id = ?
+            ORDER BY created_at ASC
+            """,
+            (task_id, result_id),
+        ).fetchall()
+    return {
+        "item": item,
+        "messages": [
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ],
+    }
+
+
+def send_review_followup_message(task_id: str, result_id: str, message: str) -> dict[str, Any]:
+    user_message = str(message or "").strip()
+    if not user_message:
+        raise ReviewTaskError("请输入追问内容")
+    if len(user_message) > 4000:
+        raise ReviewTaskError("追问内容过长，请缩短后再发送")
+
+    task = get_review_task(task_id)
+    if not task:
+        raise ReviewTaskError("审校任务不存在")
+    item = get_review_result_detail(task_id, result_id)
+    if item is None:
+        raise ReviewTaskError("问题条目不存在")
+
+    config = task.get("config", {})
+    history = get_review_followup_messages(task_id, result_id)["messages"]
+    limited_history = history[-12:]
+    messages = _build_followup_messages(item, config, limited_history, user_message)
+    try:
+        reply = followup_chat(
+            task_id=task_id,
+            messages=messages,
+            enable_thinking=bool(config.get("enable_thinking", False)),
+        ).strip()
+    except SharedProviderError as exc:
+        raise ReviewTaskError(str(exc)) from exc
+    if not reply:
+        raise ReviewTaskError("模型没有返回内容")
+
+    now = utc_now()
+    user_id = uuid.uuid4().hex
+    assistant_id = uuid.uuid4().hex
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO review_followup_messages (id, task_id, result_id, role, content, created_at)
+            VALUES (?, ?, ?, 'user', ?, ?)
+            """,
+            (user_id, task_id, result_id, user_message, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO review_followup_messages (id, task_id, result_id, role, content, created_at)
+            VALUES (?, ?, ?, 'assistant', ?, ?)
+            """,
+            (assistant_id, task_id, result_id, reply, utc_now()),
+        )
+    return get_review_followup_messages(task_id, result_id)
+
+
+def get_review_result_detail(task_id: str, result_id: str) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT r.*, i.source_text, i.target_text, i.source_file, i.sheet_name,
+                   i.segment_id, i.row_number,
+                   COALESCE(f.matched_words, '') AS matched_words
+            FROM review_results r
+            JOIN file_items i ON i.id = r.item_id
+            LEFT JOIN forbidden_results f ON f.task_id = r.task_id AND f.item_id = r.item_id
+            WHERE r.task_id = ? AND r.id = ?
+            """,
+            (task_id, result_id),
+        ).fetchone()
+    return _result_to_dict(row) if row else None
+
+
 def _review_result_has_issue(item: dict[str, Any], config: dict[str, Any]) -> bool:
     status = str(item.get("status") or "")
     if status == "failed":
@@ -243,6 +338,69 @@ def _review_result_has_issue(item: dict[str, Any], config: dict[str, Any]) -> bo
     if str(config.get("mode") or "") == "forbidden_only":
         return bool(str(item.get("matched_words") or "").strip())
     return bool(item.get("has_issue")) or bool(str(item.get("matched_words") or "").strip())
+
+
+def _build_followup_messages(
+    item: dict[str, Any],
+    config: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_message: str,
+) -> list[dict[str, str]]:
+    context = _format_followup_context(item, config)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是翻译审校结果的追问助手。请只围绕给定审校条目回答，"
+                "帮助用户理解问题、判断建议是否合理，或给出更好的改法。"
+                "回答要简洁、明确，不要编造原文和译文之外的信息。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": "这是当前审校条目的固定上下文：\n" + context,
+        },
+    ]
+    for message in history:
+        role = str(message.get("role") or "").strip()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content") or "").strip()
+        if content:
+            messages.append({"role": role, "content": content[:6000]})
+    messages.append({"role": "user", "content": user_message})
+    return messages
+
+
+def _format_followup_context(item: dict[str, Any], config: dict[str, Any]) -> str:
+    lines = [
+        f"审校模式：{config.get('mode', 'normal')}",
+        f"原文：{item.get('source_text') or ''}",
+        f"译文：{item.get('target_text') or ''}",
+        f"修改建议：{item.get('suggestion') or ''}",
+    ]
+    issue_type = str(item.get("issue_type") or "").strip()
+    issue = str(item.get("error_message") or item.get("issue") or "").strip()
+    if issue_type:
+        lines.append(f"问题类型：{issue_type}")
+    if issue:
+        lines.append(f"问题说明：{issue}")
+    checks = item.get("checks", {})
+    if isinstance(checks, dict):
+        check_lines = [f"{key}：{value}" for key, value in checks.items() if str(value or "").strip()]
+        if check_lines:
+            lines.append("定向检查：\n" + "\n".join(check_lines))
+    matched_words = str(item.get("matched_words") or "").strip()
+    if matched_words:
+        lines.append(f"禁用词命中：{matched_words}")
+    location = []
+    if item.get("sheet_name"):
+        location.append(str(item.get("sheet_name")))
+    if item.get("row_number"):
+        location.append(f"第 {item.get('row_number')} 行")
+    if location:
+        lines.append("位置：" + " / ".join(location))
+    return "\n".join(lines)
 
 
 def _run_review_task(task_id: str) -> None:

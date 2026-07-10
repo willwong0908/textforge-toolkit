@@ -198,6 +198,18 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_followup_messages (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                result_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_results)").fetchall()
@@ -216,6 +228,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE file_items ADD COLUMN source_column TEXT")
         if "target_column" not in item_columns:
             conn.execute("ALTER TABLE file_items ADD COLUMN target_column TEXT")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_followup_messages_result
+            ON review_followup_messages(task_id, result_id, created_at)
+            """
+        )
 
 
 def dumps_json(data: Any) -> str:

@@ -65,10 +65,12 @@ if __package__:
     from .ai_review.review_service import (
         ReviewTaskError,
         create_review_task,
+        get_review_followup_messages,
         get_review_issue_results,
         get_review_logs,
         get_review_results,
         get_review_task,
+        send_review_followup_message,
     )
     from .ai_review.shared_provider import (
         SharedProviderError,
@@ -163,10 +165,12 @@ else:
     from term_extractor_app.ai_review.review_service import (
         ReviewTaskError,
         create_review_task,
+        get_review_followup_messages,
         get_review_issue_results,
         get_review_logs,
         get_review_results,
         get_review_task,
+        send_review_followup_message,
     )
     from term_extractor_app.ai_review.shared_provider import (
         SharedProviderError,
@@ -407,6 +411,10 @@ class AIReviewStartPayload(BaseModel):
     enable_ai_review: bool = True
     enable_forbidden_check: bool = False
     forbidden_template_id: str | None = None
+
+
+class AIReviewFollowupPayload(BaseModel):
+    message: str
 
 
 PROMPT_TEMPLATE_META = [
@@ -1911,6 +1919,24 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="审校任务不存在")
         return {"task": task, "results": get_review_issue_results(task_id)}
 
+    @app.get("/api/ai-review/tasks/{task_id}/followup/{result_id}")
+    async def ai_review_followup_messages(task_id: str, result_id: str):
+        if not get_review_task(task_id):
+            raise HTTPException(status_code=404, detail="审校任务不存在")
+        try:
+            return get_review_followup_messages(task_id, result_id)
+        except ReviewTaskError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/ai-review/tasks/{task_id}/followup/{result_id}")
+    async def ai_review_followup_send(task_id: str, result_id: str, payload: AIReviewFollowupPayload):
+        if not get_review_task(task_id):
+            raise HTTPException(status_code=404, detail="审校任务不存在")
+        try:
+            return send_review_followup_message(task_id, result_id, payload.message)
+        except ReviewTaskError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/ai-review/outputs/open-folder")
     async def ai_review_open_outputs():
         try:
@@ -2903,6 +2929,28 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div>
   </div>
+  <div id="reviewFollowupOverlay" class="modal-overlay" hidden>
+    <div class="modal-card review-followup-modal">
+      <div class="modal-header">
+        <div>
+          <h3>追问审校结果</h3>
+          <p id="reviewFollowupSummary">围绕当前问题继续提问</p>
+        </div>
+        <button id="closeReviewFollowupButton" class="modal-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="review-followup-layout">
+        <aside id="reviewFollowupContext" class="review-followup-context"></aside>
+        <section class="review-followup-chat">
+          <div id="reviewFollowupMessages" class="review-followup-messages"></div>
+          <div class="review-followup-input">
+            <textarea id="reviewFollowupInput" placeholder="输入你的追问，例如：这个建议为什么这样改？有没有更自然的译法？"></textarea>
+            <button id="sendReviewFollowupButton" class="primary" type="button">发送</button>
+          </div>
+          <span id="reviewFollowupHint" class="hint"></span>
+        </section>
+      </div>
+    </div>
+  </div>
 
   <dialog id="promptDialog" class="dialog">
     <form method="dialog" class="dialog-body">
@@ -3735,6 +3783,123 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-diff-cell .diff-inline-label {
   margin-bottom: 6px;
 }
+.review-followup-cell {
+  width: 92px;
+  text-align: center;
+}
+.review-followup-cell button {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+}
+.review-followup-modal {
+  width: min(1180px, calc(100vw - 36px));
+  height: min(820px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.review-followup-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 16px;
+}
+.review-followup-context {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #f7fafc;
+}
+.followup-context-card {
+  display: grid;
+  gap: 12px;
+}
+.followup-context-section {
+  display: grid;
+  gap: 5px;
+}
+.followup-context-section span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.followup-context-section p {
+  margin: 0;
+  max-height: 138px;
+  overflow: auto;
+  padding-right: 4px;
+  color: #24364d;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.review-followup-chat {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 12px;
+}
+.review-followup-messages {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fbfdff;
+}
+.followup-message {
+  width: min(78%, 720px);
+  padding: 11px 13px;
+  border-radius: 16px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.followup-message.user {
+  justify-self: end;
+  background: #e7f1ef;
+  color: #123f3a;
+}
+.followup-message.assistant {
+  justify-self: start;
+  background: #f1f5f9;
+  color: #24364d;
+}
+.followup-message-empty {
+  align-self: center;
+  justify-self: center;
+  color: var(--muted);
+  padding: 20px;
+}
+.review-followup-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.review-followup-input textarea {
+  min-height: 82px;
+  max-height: 180px;
+  resize: vertical;
+  border: 1px solid #cbd8e6;
+  border-radius: 14px;
+  padding: 11px 12px;
+  font: inherit;
+  line-height: 1.55;
+}
+@media (max-width: 860px) {
+  .review-followup-layout {
+    grid-template-columns: 1fr;
+  }
+  .review-followup-context {
+    max-height: 260px;
+  }
+}
 .builtin-preview-table { table-layout: fixed; }
 .builtin-preview-table th:nth-child(1),
 .builtin-preview-table td:nth-child(1) { width: 68px; }
@@ -4466,6 +4631,8 @@ let aiReviewSheetNames = [];
 let aiReviewColumnsBySheet = {};
 let aiReviewExcelMappingState = {};
 let aiReviewActiveSheetName = "";
+let aiReviewIssueResults = [];
+let aiReviewFollowupState = { taskId: "", resultId: "", item: null, messages: [] };
 const TASK_STATUS_BY_PAGE = {
   overviewPage: {
     taskLabel: "文本预处理工具",
@@ -5330,6 +5497,9 @@ function renderAiReviewForbiddenTemplateOptions() {
 
 function clearAiReviewTaskHint() {
   $("reviewTaskHint").textContent = "";
+  aiReviewIssueResults = [];
+  aiReviewFollowupState = { taskId: "", resultId: "", item: null, messages: [] };
+  closeReviewFollowupDialog();
 }
 
 function renderAiReviewProgress(task = {}) {
@@ -5976,7 +6146,7 @@ function renderReviewDetailRows(task, results) {
   const head = $("reviewDetailHead");
   const body = $("reviewDetailBody");
   const extraHeaders = reviewDetailExtraHeaders(task);
-  const headers = ["原文", "原译文", "修改建议", ...extraHeaders];
+  const headers = ["原文", "原译文", "修改建议", ...extraHeaders, "追问"];
   head.innerHTML = "";
   const headRow = document.createElement("tr");
   headers.forEach((header) => {
@@ -5988,6 +6158,7 @@ function renderReviewDetailRows(task, results) {
 
   body.innerHTML = "";
   const items = Array.isArray(results) ? results : [];
+  aiReviewIssueResults = items;
   $("reviewDetailSummary").textContent = items.length ? `共 ${items.length} 条问题` : "暂无问题条目";
   if (!items.length) {
     body.innerHTML = `<tr><td colspan="${headers.length}" class="empty-cell">暂无问题条目</td></tr>`;
@@ -6008,6 +6179,17 @@ function renderReviewDetailRows(task, results) {
       td.textContent = String(value || "");
       tr.appendChild(td);
     });
+    const followupTd = document.createElement("td");
+    followupTd.className = "review-followup-cell";
+    const followupButton = document.createElement("button");
+    followupButton.type = "button";
+    followupButton.className = "secondary";
+    followupButton.textContent = "追问";
+    followupButton.addEventListener("click", () => openReviewFollowupDialog(item.id).catch((error) => {
+      $("reviewFollowupHint").textContent = error.message;
+    }));
+    followupTd.appendChild(followupButton);
+    tr.appendChild(followupTd);
     body.appendChild(tr);
   });
 }
@@ -6024,6 +6206,104 @@ async function openReviewDetailDialog() {
 
 function closeReviewDetailDialog() {
   $("reviewDetailOverlay").hidden = true;
+}
+
+function reviewFollowupIssueText(item) {
+  const task = aiReviewCurrentTask || {};
+  const [issueType, issueText] = reviewDetailExtraValues(task, item || {});
+  return { issueType, issueText };
+}
+
+function renderReviewFollowupContext(item) {
+  const container = $("reviewFollowupContext");
+  const issue = reviewFollowupIssueText(item || {});
+  const sections = [
+    ["原文", item?.source_text || ""],
+    ["译文", item?.target_text || ""],
+    ["修改建议", item?.suggestion || ""],
+    ["问题类型", issue.issueType || ""],
+    ["问题说明", issue.issueText || ""],
+  ].filter(([, value]) => String(value || "").trim());
+  container.innerHTML = `
+    <div class="followup-context-card">
+      ${sections.map(([label, value]) => `
+        <div class="followup-context-section">
+          <span>${escapeHtml(label)}</span>
+          <p>${escapeHtml(String(value || ""))}</p>
+        </div>
+      `).join("")}
+    </div>`;
+}
+
+function renderReviewFollowupMessages(messages) {
+  const box = $("reviewFollowupMessages");
+  const items = Array.isArray(messages) ? messages : [];
+  box.innerHTML = "";
+  if (!items.length) {
+    box.innerHTML = '<div class="followup-message-empty">还没有追问记录，可以直接输入问题。</div>';
+    return;
+  }
+  items.forEach((message) => {
+    const div = document.createElement("div");
+    const role = String(message.role || "") === "user" ? "user" : "assistant";
+    div.className = `followup-message ${role}`;
+    div.textContent = String(message.content || "");
+    box.appendChild(div);
+  });
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderReviewFollowupDialog(data) {
+  const item = data?.item || aiReviewFollowupState.item || {};
+  const messages = Array.isArray(data?.messages) ? data.messages : [];
+  aiReviewFollowupState.item = item;
+  aiReviewFollowupState.messages = messages;
+  $("reviewFollowupSummary").textContent = item?.row_number ? `第 ${item.row_number} 行` : "围绕当前问题继续提问";
+  renderReviewFollowupContext(item);
+  renderReviewFollowupMessages(messages);
+}
+
+async function openReviewFollowupDialog(resultId) {
+  if (!aiReviewTaskId || !resultId) return;
+  aiReviewFollowupState = { taskId: aiReviewTaskId, resultId: String(resultId), item: null, messages: [] };
+  $("reviewFollowupInput").value = "";
+  $("reviewFollowupHint").textContent = "正在读取对话...";
+  $("reviewFollowupOverlay").hidden = false;
+  const data = await api(`/api/ai-review/tasks/${encodeURIComponent(aiReviewTaskId)}/followup/${encodeURIComponent(resultId)}`);
+  renderReviewFollowupDialog(data);
+  $("reviewFollowupHint").textContent = "";
+  $("reviewFollowupInput").focus();
+}
+
+function closeReviewFollowupDialog() {
+  $("reviewFollowupOverlay").hidden = true;
+}
+
+async function sendReviewFollowupMessage() {
+  const message = $("reviewFollowupInput").value.trim();
+  if (!message) {
+    $("reviewFollowupHint").textContent = "请输入追问内容";
+    return;
+  }
+  const taskId = aiReviewFollowupState.taskId || aiReviewTaskId;
+  const resultId = aiReviewFollowupState.resultId;
+  if (!taskId || !resultId) {
+    $("reviewFollowupHint").textContent = "当前没有可追问的条目";
+    return;
+  }
+  $("sendReviewFollowupButton").disabled = true;
+  $("reviewFollowupHint").textContent = "发送中...";
+  try {
+    const data = await api(`/api/ai-review/tasks/${encodeURIComponent(taskId)}/followup/${encodeURIComponent(resultId)}`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+    $("reviewFollowupInput").value = "";
+    renderReviewFollowupDialog(data);
+    $("reviewFollowupHint").textContent = "";
+  } finally {
+    $("sendReviewFollowupButton").disabled = false;
+  }
 }
 
 function appendAiReviewLogs(logs) {
@@ -7615,6 +7895,25 @@ $("closeReviewDetailButton").addEventListener("click", closeReviewDetailDialog);
 $("reviewDetailOverlay").addEventListener("click", (event) => {
   if (event.target === $("reviewDetailOverlay")) {
     closeReviewDetailDialog();
+  }
+});
+$("closeReviewFollowupButton").addEventListener("click", closeReviewFollowupDialog);
+$("reviewFollowupOverlay").addEventListener("click", (event) => {
+  if (event.target === $("reviewFollowupOverlay")) {
+    closeReviewFollowupDialog();
+  }
+});
+$("sendReviewFollowupButton").addEventListener("click", () => sendReviewFollowupMessage().catch((error) => {
+  $("reviewFollowupHint").textContent = error.message;
+  $("sendReviewFollowupButton").disabled = false;
+}));
+$("reviewFollowupInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    sendReviewFollowupMessage().catch((error) => {
+      $("reviewFollowupHint").textContent = error.message;
+      $("sendReviewFollowupButton").disabled = false;
+    });
   }
 });
 $("startButton").addEventListener("click", startTask);

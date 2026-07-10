@@ -113,3 +113,33 @@ def review_chat(
         return str(response.content or "")
 
     return asyncio.run(_run())
+
+
+def followup_chat(
+    task_id: str,
+    messages: list[dict[str, str]],
+    enable_thinking: bool = False,
+) -> str:
+    async def _run() -> str:
+        provider_name, provider = _load_provider_settings()
+        if not provider.api_key:
+            raise SharedProviderError("请先加载 DeepSeek API Key")
+        if not provider.model:
+            raise SharedProviderError("请先选择 DeepSeek 模型")
+        adapter = ProviderRegistry.create_adapter(provider_name, provider)
+        try:
+            request = LLMRequest(
+                task_id=task_id,
+                task_type="ai_review_followup_chat",
+                prompt=messages[-1]["content"] if messages else "",
+                messages=messages,
+                metadata={"enable_thinking": bool(enable_thinking)},
+            )
+            response = await adapter.send_prompt(request)
+        finally:
+            await adapter.close()
+        if not response.success:
+            raise SharedProviderError(response.error or "追问请求失败")
+        return str(response.content or "")
+
+    return asyncio.run(_run())
