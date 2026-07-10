@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import webbrowser
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict
 
 if __package__:
@@ -1921,21 +1923,40 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
 
     @app.get("/api/ai-review/tasks/{task_id}/followup/{result_id}")
     async def ai_review_followup_messages(task_id: str, result_id: str):
-        if not get_review_task(task_id):
-            raise HTTPException(status_code=404, detail="审校任务不存在")
         try:
-            return get_review_followup_messages(task_id, result_id)
+            init_ai_review_db()
+            if not get_review_task(task_id):
+                raise HTTPException(status_code=404, detail="审校任务不存在")
+            result = get_review_followup_messages(task_id, result_id)
+            track_event("feature_used.ai_review_followup_open")
+            return result
+        except HTTPException:
+            raise
         except ReviewTaskError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            print("[AI_REVIEW][ERROR][{0}] 追问读取失败：{1}\n{2}".format(task_id, exc, traceback.format_exc()), flush=True)
+            raise HTTPException(status_code=500, detail="追问读取失败：{0}".format(exc)) from exc
 
     @app.post("/api/ai-review/tasks/{task_id}/followup/{result_id}")
     async def ai_review_followup_send(task_id: str, result_id: str, payload: AIReviewFollowupPayload):
-        if not get_review_task(task_id):
-            raise HTTPException(status_code=404, detail="审校任务不存在")
         try:
-            return send_review_followup_message(task_id, result_id, payload.message)
+            init_ai_review_db()
+            if not get_review_task(task_id):
+                raise HTTPException(status_code=404, detail="审校任务不存在")
+            track_event("feature_used.ai_review_followup_send")
+            result = await run_in_threadpool(send_review_followup_message, task_id, result_id, payload.message)
+            track_event("feature_success.ai_review_followup_send")
+            return result
+        except HTTPException:
+            raise
         except ReviewTaskError as exc:
+            track_event("feature_fail.ai_review_followup_send")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            track_event("feature_fail.ai_review_followup_send")
+            print("[AI_REVIEW][ERROR][{0}] 追问发送失败：{1}\n{2}".format(task_id, exc, traceback.format_exc()), flush=True)
+            raise HTTPException(status_code=500, detail="追问发送失败：{0}".format(exc)) from exc
 
     @app.post("/api/ai-review/outputs/open-folder")
     async def ai_review_open_outputs():
@@ -3775,6 +3796,10 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   overflow-wrap: anywhere;
   line-height: 1.6;
 }
+.review-detail-issue-cell {
+  position: relative;
+  padding-bottom: 48px;
+}
 .review-diff-cell .diff-inline-side {
   min-height: 0;
   padding: 10px;
@@ -3783,14 +3808,14 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-diff-cell .diff-inline-label {
   margin-bottom: 6px;
 }
-.review-followup-cell {
-  width: 92px;
-  text-align: center;
-}
-.review-followup-cell button {
+.review-followup-inline-button {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
   min-height: 32px;
   padding: 0 12px;
   border-radius: 999px;
+  font-size: 13px;
 }
 .review-followup-modal {
   width: min(1180px, calc(100vw - 36px));
@@ -4994,7 +5019,12 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || response.statusText);
+    let message = text || response.statusText;
+    try {
+      const data = JSON.parse(text);
+      message = data?.detail || data?.message || message;
+    } catch (_) {}
+    throw new Error(message);
   }
   return response.json();
 }
@@ -6146,7 +6176,7 @@ function renderReviewDetailRows(task, results) {
   const head = $("reviewDetailHead");
   const body = $("reviewDetailBody");
   const extraHeaders = reviewDetailExtraHeaders(task);
-  const headers = ["原文", "原译文", "修改建议", ...extraHeaders, "追问"];
+  const headers = ["原文", "原译文", "修改建议", ...extraHeaders];
   head.innerHTML = "";
   const headRow = document.createElement("tr");
   headers.forEach((header) => {
@@ -6174,22 +6204,25 @@ function renderReviewDetailRows(task, results) {
     tr.appendChild(createReviewDiffCell(tokens.leftHtml, "delete"));
     tr.appendChild(createReviewDiffCell(tokens.rightHtml, "add"));
 
-    reviewDetailExtraValues(task, item).forEach((value) => {
+    const extraValues = reviewDetailExtraValues(task, item);
+    extraValues.forEach((value, index) => {
       const td = document.createElement("td");
+      if (index === extraValues.length - 1) {
+        td.className = "review-detail-issue-cell";
+      }
       td.textContent = String(value || "");
+      if (index === extraValues.length - 1) {
+        const followupButton = document.createElement("button");
+        followupButton.type = "button";
+        followupButton.className = "secondary review-followup-inline-button";
+        followupButton.textContent = "追问";
+        followupButton.addEventListener("click", () => openReviewFollowupDialog(item.id).catch((error) => {
+          $("reviewFollowupHint").textContent = error.message;
+        }));
+        td.appendChild(followupButton);
+      }
       tr.appendChild(td);
     });
-    const followupTd = document.createElement("td");
-    followupTd.className = "review-followup-cell";
-    const followupButton = document.createElement("button");
-    followupButton.type = "button";
-    followupButton.className = "secondary";
-    followupButton.textContent = "追问";
-    followupButton.addEventListener("click", () => openReviewFollowupDialog(item.id).catch((error) => {
-      $("reviewFollowupHint").textContent = error.message;
-    }));
-    followupTd.appendChild(followupButton);
-    tr.appendChild(followupTd);
     body.appendChild(tr);
   });
 }
@@ -6269,10 +6302,14 @@ async function openReviewFollowupDialog(resultId) {
   $("reviewFollowupInput").value = "";
   $("reviewFollowupHint").textContent = "正在读取对话...";
   $("reviewFollowupOverlay").hidden = false;
-  const data = await api(`/api/ai-review/tasks/${encodeURIComponent(aiReviewTaskId)}/followup/${encodeURIComponent(resultId)}`);
-  renderReviewFollowupDialog(data);
-  $("reviewFollowupHint").textContent = "";
-  $("reviewFollowupInput").focus();
+  try {
+    const data = await api(`/api/ai-review/tasks/${encodeURIComponent(aiReviewTaskId)}/followup/${encodeURIComponent(resultId)}`);
+    renderReviewFollowupDialog(data);
+    $("reviewFollowupHint").textContent = "";
+    $("reviewFollowupInput").focus();
+  } catch (error) {
+    $("reviewFollowupHint").textContent = error.message || "追问读取失败";
+  }
 }
 
 function closeReviewFollowupDialog() {
@@ -7908,7 +7945,7 @@ $("sendReviewFollowupButton").addEventListener("click", () => sendReviewFollowup
   $("sendReviewFollowupButton").disabled = false;
 }));
 $("reviewFollowupInput").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+  if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     sendReviewFollowupMessage().catch((error) => {
       $("reviewFollowupHint").textContent = error.message;

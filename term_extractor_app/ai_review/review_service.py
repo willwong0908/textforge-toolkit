@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import traceback
 import threading
 import time
 import uuid
 from typing import Any
 
-from .database import dumps_json, get_connection, loads_json, utc_now
+from .database import dumps_json, get_connection, init_db, loads_json, utc_now
 from .directional_service import enabled_review_types, get_directional_template
 from .forbidden_service import check_forbidden_words, get_forbidden_template, parse_forbidden_words
 from .output_service import generate_review_excel
@@ -234,6 +235,7 @@ def get_review_issue_results(task_id: str) -> list[dict[str, Any]]:
 
 
 def get_review_followup_messages(task_id: str, result_id: str) -> dict[str, Any]:
+    init_db()
     item = get_review_result_detail(task_id, result_id)
     if item is None:
         raise ReviewTaskError("问题条目不存在")
@@ -262,6 +264,7 @@ def get_review_followup_messages(task_id: str, result_id: str) -> dict[str, Any]
 
 
 def send_review_followup_message(task_id: str, result_id: str, message: str) -> dict[str, Any]:
+    init_db()
     user_message = str(message or "").strip()
     if not user_message:
         raise ReviewTaskError("请输入追问内容")
@@ -287,6 +290,9 @@ def send_review_followup_message(task_id: str, result_id: str, message: str) -> 
         ).strip()
     except SharedProviderError as exc:
         raise ReviewTaskError(str(exc)) from exc
+    except Exception as exc:
+        _add_log(task_id, "error", "追问请求失败：{0}\n{1}".format(exc, traceback.format_exc()))
+        raise ReviewTaskError("追问请求失败：{0}".format(exc)) from exc
     if not reply:
         raise ReviewTaskError("模型没有返回内容")
 
