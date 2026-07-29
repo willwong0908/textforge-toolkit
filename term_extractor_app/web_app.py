@@ -90,6 +90,7 @@ if __package__:
         export_cached_diff_records as export_diff_excel_cached_records,
         read_cached_diff_preview as read_diff_excel_cached_preview,
         run_compare_to_cache as run_diff_excel_compare_to_cache,
+        scan_field_match_headers as scan_diff_excel_field_match_headers,
     )
     from .feedback import FeedbackError, feedback_status, submit_feedback
     from .models import TaskInput, normalize_extraction_mode, sync_extraction_flags
@@ -342,6 +343,10 @@ class CrossExcelMergePayload(BaseModel):
 class DiffExcelComparePayload(BaseModel):
     path_a: str
     path_b: str
+    compare_mode: str = "position"
+    reference_field: str = ""
+    compare_fields: list[str] = []
+    include_unmatched: bool = False
 
 
 class DiffExcelExportPayload(BaseModel):
@@ -1477,9 +1482,17 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
                 track_event("diff.mode.file_to_file")
             elif path_a.is_dir() or path_b.is_dir():
                 track_event("diff.mode.folder_to_folder")
+            if payload.compare_mode == "field_match":
+                track_event("diff.mode.field_match")
+            else:
+                track_event("diff.mode.position")
             result = run_diff_excel_compare_to_cache(
                 payload.path_a,
                 payload.path_b,
+                compare_mode=payload.compare_mode,
+                reference_field=payload.reference_field,
+                compare_fields=payload.compare_fields,
+                include_unmatched=payload.include_unmatched,
                 ignore_case=False,
                 trim_whitespace=False,
             )
@@ -1487,6 +1500,13 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             return result
         except Exception as exc:
             track_event("diff.compare.fail")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/diff-excel/field-match-headers")
+    async def diff_excel_field_match_headers(path_a: str, path_b: str):
+        try:
+            return scan_diff_excel_field_match_headers(path_a, path_b)
+        except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/diff-excel/export")
@@ -2633,6 +2653,13 @@ INDEX_HTML = """<!doctype html>
             <div class="actions">
               <button id="startDiffExcelButton" class="primary" type="button">开始比对</button>
               <button id="clearDiffExcelButton" class="secondary" type="button">清空结果</button>
+              <div class="diff-mode-actions">
+                <select id="diffCompareMode" class="diff-mode-select" aria-label="比对方式">
+                  <option value="position">按位置比对</option>
+                  <option value="field_match">按字段匹配</option>
+                </select>
+                <button id="openDiffFieldSettingsButton" class="secondary icon-button" type="button" title="设置字段匹配" aria-label="设置字段匹配" hidden>⚙</button>
+              </div>
               <span id="diffExcelHint" class="hint"></span>
             </div>
           </section>
@@ -2705,7 +2732,7 @@ INDEX_HTML = """<!doctype html>
           <div class="pattern-table-wrap">
             <table class="pattern-table">
               <thead>
-                <tr>
+                <tr id="diffExcelHead">
                   <th>文件 A</th>
                   <th>文件 B</th>
                   <th>Sheet</th>
@@ -2720,6 +2747,47 @@ INDEX_HTML = """<!doctype html>
           </div>
         </section>
       </section>
+
+      <div id="diffFieldSettingsOverlay" class="modal-overlay" hidden>
+        <section class="modal-card diff-field-settings-modal" role="dialog" aria-modal="true" aria-labelledby="diffFieldSettingsTitle">
+          <header class="modal-header">
+            <div>
+              <h3 id="diffFieldSettingsTitle">字段匹配设置</h3>
+              <p id="diffFieldSettingsSummary">选择用于匹配数据行和比较内容的表头。</p>
+            </div>
+            <button id="closeDiffFieldSettingsButton" class="modal-close" type="button" aria-label="关闭">×</button>
+          </header>
+          <div class="diff-field-settings-grid">
+            <label>参考字段
+              <select id="diffReferenceField"><option value="">请选择参考字段</option></select>
+            </label>
+            <div class="diff-header-presence">
+              <span>文件 A 表头 <strong id="diffHeadersACount">0</strong></span>
+              <span>文件 B 表头 <strong id="diffHeadersBCount">0</strong></span>
+              <span>共同表头 <strong id="diffHeadersCommonCount">0</strong></span>
+            </div>
+          </div>
+          <div class="diff-compare-fields-block">
+            <div class="field-block-head">
+              <strong>比对字段</strong>
+              <span>仅显示两侧均存在的表头</span>
+            </div>
+            <div id="diffCompareFieldList" class="diff-compare-field-list"></div>
+          </div>
+          <label class="check-line diff-unmatched-line">
+            <input id="diffIncludeUnmatched" type="checkbox" />
+            <span>标记未匹配行</span>
+            <span class="info-tip" tabindex="0" aria-label="说明">i<span class="info-tip-content">开启后，其中一侧存在另一侧没有的参考值时也会列为差异；批量标记时会标记该侧对应的整行。关闭则会忽略该参考值。</span></span>
+          </label>
+          <div class="modal-footer">
+            <span id="diffFieldSettingsHint" class="hint"></span>
+            <div class="modal-footer-actions">
+              <button id="cancelDiffFieldSettingsButton" class="secondary" type="button">取消</button>
+              <button id="saveDiffFieldSettingsButton" class="primary" type="button">确定</button>
+            </div>
+          </div>
+        </section>
+      </div>
 
       <section id="aiReviewTaskPage" class="page-section">
         <div class="grid dashboard-grid">
@@ -3981,11 +4049,34 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .preset-color-btn:hover {
   transform: translateY(-1px);
 }
+.diff-mode-actions { display: inline-flex; align-items: center; gap: 8px; }
+.diff-mode-select { width: auto; min-width: 136px; min-height: 40px; padding: 0 34px 0 12px; font-weight: 800; }
+.icon-button { width: 40px; min-width: 40px; min-height: 40px; padding: 0; font-size: 18px; line-height: 1; }
+.diff-field-settings-modal { width: min(760px, 100%); }
+.diff-field-settings-grid { display: grid; gap: 12px; margin-bottom: 18px; }
+.diff-header-presence { display: grid; grid-template-columns: 1fr; gap: 6px; }
+.diff-header-presence span { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #f8fbfd; color: var(--muted); font-size: 13px; }
+.diff-header-presence strong { color: var(--ink); font-size: 14px; }
+.diff-compare-fields-block { display: grid; gap: 8px; margin-bottom: 16px; }
+.field-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.field-block-head span { color: var(--muted); font-size: 13px; }
+.diff-compare-field-list { display: grid; grid-template-columns: 1fr; gap: 0; max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.diff-compare-field-item { display: flex; align-items: flex-start; gap: 10px; min-width: 0; height: auto; min-height: 40px; padding: 10px 12px; border: 0; border-bottom: 1px solid #e4ebf2; border-radius: 0; background: #fff; cursor: pointer; }
+.diff-compare-field-item:last-child { border-bottom: 0; }
+.diff-compare-field-item:hover { background: #f7fafc; }
+.diff-compare-field-item input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; min-height: 16px; margin: 2px 0 0; accent-color: var(--primary); }
+.diff-compare-field-item span { flex: 1; min-width: 0; color: var(--ink); line-height: 1.45; white-space: normal; overflow-wrap: anywhere; word-break: break-all; }
+.diff-unmatched-line { display: flex; width: fit-content; min-height: 32px; margin: 0; padding: 4px 0; border: 0; border-radius: 0; background: transparent; }
+.info-tip { position: relative; display: inline-grid; place-items: center; width: 17px; height: 17px; border: 1px solid #7d90a5; border-radius: 50%; color: #50657a; font-size: 12px; font-weight: 800; cursor: help; }
+.info-tip-content { position: absolute; z-index: 10; left: 50%; bottom: calc(100% + 9px); width: min(330px, 70vw); padding: 10px 12px; border-radius: 10px; background: #203147; color: #fff; font-size: 13px; line-height: 1.55; font-weight: 500; box-shadow: 0 10px 28px rgba(15,23,42,.22); opacity: 0; pointer-events: none; transform: translate(-50%, 4px); transition: opacity .14s ease, transform .14s ease; }
+.info-tip:hover .info-tip-content, .info-tip:focus .info-tip-content { opacity: 1; transform: translate(-50%, 0); }
+@media (max-width: 680px) { .diff-header-presence { padding-bottom: 0; } .field-block-head { align-items: flex-start; flex-direction: column; gap: 3px; } .diff-mode-actions { width: 100%; } .diff-mode-select { flex: 1; } }
 .diff-inline-card {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+.diff-inline-card.diff-inline-single { grid-template-columns: minmax(0, 1fr); }
 .diff-inline-side {
   border-radius: 12px;
   padding: 10px 12px;
@@ -4639,6 +4730,12 @@ let diffExcelState = {
   previewLimit: 1000,
   previewTruncated: false,
 };
+let diffFieldMatchSettings = {
+  headers: null,
+  referenceField: "",
+  compareFields: [],
+  includeUnmatched: false,
+};
 let feedbackStatusState = { enabled: false, log_path: "output/log.txt", has_log_file: false };
 let feedbackScreenshotFile = null;
 let currentPageId = "toolGuidePage";
@@ -5225,6 +5322,111 @@ function renderDiffExcelSummary() {
   $("openDiffOutputFolderButton").disabled = !diffExcelState.outputFile;
 }
 
+function diffCompareMode() {
+  return $("diffCompareMode").value === "field_match" ? "field_match" : "position";
+}
+
+function resetDiffFieldMatchSettings() {
+  diffFieldMatchSettings = {
+    headers: null,
+    referenceField: "",
+    compareFields: [],
+    includeUnmatched: false,
+  };
+}
+
+function syncDiffCompareModeUi() {
+  const isFieldMatch = diffCompareMode() === "field_match";
+  $("openDiffFieldSettingsButton").hidden = !isFieldMatch;
+  if (!isFieldMatch) {
+    $("diffExcelHint").textContent = "";
+  }
+}
+
+function renderDiffFieldSettings(data = diffFieldMatchSettings.headers || {}) {
+  const commonHeaders = Array.isArray(data.common_headers) ? data.common_headers : [];
+  $("diffHeadersACount").textContent = Number((data.headers_a || []).length || 0);
+  $("diffHeadersBCount").textContent = Number((data.headers_b || []).length || 0);
+  $("diffHeadersCommonCount").textContent = commonHeaders.length;
+  $("diffFieldSettingsSummary").textContent = Number(data.matched_pairs || 0)
+    ? `已检测到 ${Number(data.matched_pairs || 0)} 对文件，可选择两侧共同存在的表头。`
+    : "没有找到可配对的文件，请先检查路径 A 和路径 B。";
+
+  const reference = $("diffReferenceField");
+  reference.innerHTML = '<option value="">请选择参考字段</option>';
+  commonHeaders.forEach((header) => {
+    const option = document.createElement("option");
+    option.value = header;
+    option.textContent = header;
+    option.selected = header === diffFieldMatchSettings.referenceField;
+    reference.appendChild(option);
+  });
+
+  const list = $("diffCompareFieldList");
+  list.innerHTML = "";
+  if (!commonHeaders.length) {
+    list.innerHTML = '<div class="empty-cell">没有可用的共同表头</div>';
+  }
+  commonHeaders.forEach((header) => {
+    const label = document.createElement("label");
+    label.className = "diff-compare-field-item";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = header;
+    checkbox.checked = diffFieldMatchSettings.compareFields.includes(header);
+    checkbox.disabled = header === diffFieldMatchSettings.referenceField;
+    const text = document.createElement("span");
+    text.textContent = header;
+    label.append(checkbox, text);
+    list.appendChild(label);
+  });
+  $("diffIncludeUnmatched").checked = Boolean(diffFieldMatchSettings.includeUnmatched);
+}
+
+async function openDiffFieldSettings() {
+  const pathA = $("diffPathA").value.trim();
+  const pathB = $("diffPathB").value.trim();
+  if (!pathA || !pathB) {
+    $("diffExcelHint").textContent = "请先选择路径 A 和路径 B。";
+    return;
+  }
+  $("diffFieldSettingsHint").textContent = "正在读取表头...";
+  $("diffFieldSettingsOverlay").hidden = false;
+  const data = await api(`/api/diff-excel/field-match-headers?path_a=${encodeURIComponent(pathA)}&path_b=${encodeURIComponent(pathB)}`);
+  diffFieldMatchSettings.headers = data;
+  renderDiffFieldSettings(data);
+  $("diffFieldSettingsHint").textContent = "";
+}
+
+function closeDiffFieldSettings() {
+  $("diffFieldSettingsOverlay").hidden = true;
+  $("diffFieldSettingsHint").textContent = "";
+}
+
+function saveDiffFieldSettings() {
+  const referenceField = $("diffReferenceField").value.trim();
+  const compareFields = Array.from(document.querySelectorAll('#diffCompareFieldList input[type="checkbox"]:checked'))
+    .map((checkbox) => checkbox.value.trim())
+    .filter(Boolean);
+  if (!referenceField) {
+    $("diffFieldSettingsHint").textContent = "请选择参考字段。";
+    return;
+  }
+  if (!compareFields.length) {
+    $("diffFieldSettingsHint").textContent = "请至少选择一个比对字段。";
+    return;
+  }
+  if (compareFields.includes(referenceField)) {
+    $("diffFieldSettingsHint").textContent = "参考字段不能同时作为比对字段。";
+    return;
+  }
+  diffFieldMatchSettings.referenceField = referenceField;
+  diffFieldMatchSettings.compareFields = compareFields;
+  diffFieldMatchSettings.includeUnmatched = $("diffIncludeUnmatched").checked;
+  closeDiffFieldSettings();
+  $("diffExcelHint").textContent = `已设置参考字段：${referenceField}；已选择 ${compareFields.length} 个比对字段。`;
+}
+
 function buildDiffTokens(leftText, rightText) {
   function splitChars(text) {
     return Array.from(String(text || ""));
@@ -5308,6 +5510,7 @@ function buildDiffTokens(leftText, rightText) {
 }
 
 function renderDiffExcelResults() {
+  renderDiffExcelResultHead();
   const body = $("diffExcelBody");
   const records = Array.isArray(diffExcelState.previewRecords) ? diffExcelState.previewRecords : [];
   body.innerHTML = "";
@@ -5318,31 +5521,64 @@ function renderDiffExcelResults() {
   }
   records.forEach((item) => {
     const tr = document.createElement("tr");
-    [item.filename_a || "", item.filename_b || "", item.sheet || "", item.cell_address || ""].forEach((value) => {
+    const isFieldMatch = String(item.diff_kind || "") !== "cell";
+    const location = isFieldMatch
+      ? `${item.reference_field || "参考字段"}：${item.reference_value || ""}${item.compare_field ? `\n比对字段：${item.compare_field}` : ""}`
+      : `${item.sheet || ""}\n${item.cell_address || ""}`;
+    [item.filename_a || "", item.filename_b || "", isFieldMatch ? `${item.sheet_a || ""}\n${item.sheet_b || ""}` : (item.sheet || ""), location].forEach((value) => {
       const td = document.createElement("td");
       td.textContent = String(value || "");
       tr.appendChild(td);
     });
 
     const diffTd = document.createElement("td");
-    const tokens = buildDiffTokens(item.value_a || "", item.value_b || "");
-    diffTd.innerHTML = `
-      <div class="diff-inline-card">
-        <div class="diff-inline-side diff-inline-delete" title="点击跳转到文件 A 的对应单元格">
-          <div class="diff-inline-label">A 删除</div>
-          <div class="diff-inline-text">${tokens.leftHtml}</div>
-        </div>
-        <div class="diff-inline-side diff-inline-add" title="点击跳转到文件 B 的对应单元格">
-          <div class="diff-inline-label">B 添加</div>
-          <div class="diff-inline-text">${tokens.rightHtml}</div>
-        </div>
-      </div>`;
-    diffTd.querySelector(".diff-inline-delete").addEventListener("click", () => openDiffExcelCell(item, "A"));
-    diffTd.querySelector(".diff-inline-add").addEventListener("click", () => openDiffExcelCell(item, "B"));
+    if (String(item.diff_kind || "") === "unmatched_reference") {
+      const existsInA = Boolean(item.sheet_a && item.cell_address_a);
+      const label = existsInA ? "仅 A 有" : "仅 B 有";
+      const side = existsInA ? "A" : "B";
+      const style = existsInA ? "diff-inline-delete" : "diff-inline-add";
+      diffTd.innerHTML = `
+        <div class="diff-inline-card diff-inline-single">
+          <div class="diff-inline-side ${style}" title="点击跳转到实际存在的参考字段">
+            <div class="diff-inline-label">${label}</div>
+            <div class="diff-inline-text">${escapeHtml(String(item.reference_value || ""))}</div>
+          </div>
+        </div>`;
+      diffTd.querySelector(".diff-inline-side").addEventListener("click", () => openDiffExcelCell(item, side));
+    } else {
+      const tokens = buildDiffTokens(item.value_a || "", item.value_b || "");
+      diffTd.innerHTML = `
+        <div class="diff-inline-card">
+          <div class="diff-inline-side diff-inline-delete" title="点击跳转到文件 A 的对应单元格">
+            <div class="diff-inline-label">A 删除</div>
+            <div class="diff-inline-text">${tokens.leftHtml}</div>
+          </div>
+          <div class="diff-inline-side diff-inline-add" title="点击跳转到文件 B 的对应单元格">
+            <div class="diff-inline-label">B 添加</div>
+            <div class="diff-inline-text">${tokens.rightHtml}</div>
+          </div>
+        </div>`;
+      diffTd.querySelector(".diff-inline-delete").addEventListener("click", () => openDiffExcelCell(item, "A"));
+      diffTd.querySelector(".diff-inline-add").addEventListener("click", () => openDiffExcelCell(item, "B"));
+    }
     tr.appendChild(diffTd);
     body.appendChild(tr);
   });
   renderDiffExcelSummary();
+}
+
+function renderDiffExcelResultHead() {
+  const head = $("diffExcelHead");
+  const isFieldMatch = String(diffExcelState.meta?.mode_label || "") === "按字段匹配";
+  const labels = isFieldMatch
+    ? ["文件 A", "文件 B", "A / B Sheet", "参考字段与比对字段", "差异对照"]
+    : ["文件 A", "文件 B", "Sheet", "单元格", "差异对照"];
+  head.innerHTML = "";
+  labels.forEach((label) => {
+    const th = document.createElement("th");
+    th.textContent = label;
+    head.appendChild(th);
+  });
 }
 
 async function applyDiffExcelFilter() {
@@ -5397,12 +5633,18 @@ function refreshDiffPresetColorButtons() {
 
 async function openDiffExcelCell(item, target) {
   const filePath = target === "A" ? item.file_path_a : item.file_path_b;
+  const sheetName = target === "A" ? (item.sheet_a || item.sheet || "") : (item.sheet_b || item.sheet || "");
+  const cellAddress = target === "A" ? (item.cell_address_a || item.cell_address || "") : (item.cell_address_b || item.cell_address || "");
+  if (!filePath || !sheetName || !cellAddress) {
+    $("diffExcelHint").textContent = `文件 ${target} 中没有可跳转的位置。`;
+    return;
+  }
   await api("/api/diff-excel/open-cell", {
     method: "POST",
     body: JSON.stringify({
       file_path: filePath,
-      sheet_name: item.sheet || "",
-      cell_address: item.cell_address || "",
+      sheet_name: sheetName,
+      cell_address: cellAddress,
     }),
   });
 }
@@ -7332,6 +7574,7 @@ async function chooseDiffFolder(side) {
     } else {
       $("diffPathB").value = data.folder_path;
     }
+    resetDiffFieldMatchSettings();
   }
 }
 
@@ -7343,6 +7586,7 @@ async function chooseDiffFile(side) {
     } else {
       $("diffPathB").value = data.file_path;
     }
+    resetDiffFieldMatchSettings();
   }
 }
 
@@ -7514,13 +7758,18 @@ async function startDiffExcel() {
     $("diffExcelHint").textContent = "请先选择路径 A 和路径 B。";
     return;
   }
+  const compareMode = diffCompareMode();
+  if (compareMode === "field_match" && (!diffFieldMatchSettings.referenceField || !diffFieldMatchSettings.compareFields.length)) {
+    $("diffExcelHint").textContent = "请先打开字段设置，选择参考字段和比对字段。";
+    return;
+  }
   $("diffExcelHint").textContent = "比对中...";
   setTaskStatus("diffExcelPage", {
     active: true,
     taskLabel: "Diff 工具",
     pill: "运行中",
     pillClass: "running",
-    stageLabel: "Excel差异比对",
+    stageLabel: compareMode === "field_match" ? "按字段匹配" : "按位置比对",
     message: "正在读取并比较两个路径",
   });
   renderCurrentTaskStatus();
@@ -7530,6 +7779,10 @@ async function startDiffExcel() {
       body: JSON.stringify({
         path_a: pathA,
         path_b: pathB,
+        compare_mode: compareMode,
+        reference_field: diffFieldMatchSettings.referenceField,
+        compare_fields: diffFieldMatchSettings.compareFields,
+        include_unmatched: diffFieldMatchSettings.includeUnmatched,
       }),
     });
     diffExcelState.cacheFile = String(data.cache_file || "");
@@ -7541,9 +7794,13 @@ async function startDiffExcel() {
     diffExcelState.matchedCount = Number(data.total_count || 0);
     diffExcelState.previewLimit = Number(data.preview_limit || 1000);
     diffExcelState.previewTruncated = Boolean(data.preview_truncated);
+    const meta = diffExcelState.meta || {};
+    const fieldSummary = compareMode === "field_match"
+      ? `有效参考行 ${Number(meta.valid_reference_rows || 0)}，已配对 ${Number(meta.paired_reference_rows || 0)}，未匹配 ${Number(meta.unmatched_reference_rows || 0)}，跳过字段 ${Number(meta.skipped_field_count || 0)}。`
+      : "";
     $("diffExcelHint").textContent = diffExcelState.previewTruncated
       ? `比对完成，共找到 ${diffExcelState.totalCount} 处差异，当前仅预览前 ${diffExcelState.previewLimit} 条。`
-      : `比对完成，共找到 ${diffExcelState.totalCount} 处差异。`;
+      : `比对完成，共找到 ${diffExcelState.totalCount} 处差异。${fieldSummary}`;
     renderDiffExcelResults();
     setTaskStatus("diffExcelPage", {
       active: false,
@@ -7783,6 +8040,22 @@ $("searchCrossExcelButton").addEventListener("click", searchCrossExcel);
 $("mergeCrossExcelButton").addEventListener("click", mergeCrossExcel);
 $("startDiffExcelButton").addEventListener("click", startDiffExcel);
 $("clearDiffExcelButton").addEventListener("click", clearDiffExcelState);
+$("diffCompareMode").addEventListener("change", syncDiffCompareModeUi);
+$("diffPathA").addEventListener("input", resetDiffFieldMatchSettings);
+$("diffPathB").addEventListener("input", resetDiffFieldMatchSettings);
+$("diffPathA").addEventListener("change", resetDiffFieldMatchSettings);
+$("diffPathB").addEventListener("change", resetDiffFieldMatchSettings);
+$("openDiffFieldSettingsButton").addEventListener("click", () => openDiffFieldSettings().catch((error) => {
+  $("diffFieldSettingsHint").textContent = error.message;
+}));
+$("closeDiffFieldSettingsButton").addEventListener("click", closeDiffFieldSettings);
+$("cancelDiffFieldSettingsButton").addEventListener("click", closeDiffFieldSettings);
+$("saveDiffFieldSettingsButton").addEventListener("click", saveDiffFieldSettings);
+$("diffReferenceField").addEventListener("change", () => {
+  diffFieldMatchSettings.referenceField = $("diffReferenceField").value.trim();
+  diffFieldMatchSettings.compareFields = diffFieldMatchSettings.compareFields.filter((field) => field !== diffFieldMatchSettings.referenceField);
+  renderDiffFieldSettings();
+});
 $("exportDiffExcelButton").addEventListener("click", exportDiffExcel);
 $("highlightDiffExcelButton").addEventListener("click", highlightDiffExcel);
 $("diffHighlightColor").addEventListener("input", refreshDiffPresetColorButtons);
@@ -8033,6 +8306,7 @@ renderCrossExcelHeaders([]);
 renderCrossExcelSearchResults(null);
 setCrossExcelOutput("");
 refreshDiffPresetColorButtons();
+syncDiffCompareModeUi();
 updateAiReviewModeVisibility();
 renderCurrentTaskStatus();
 Promise.all([
