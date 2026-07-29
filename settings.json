@@ -108,7 +108,7 @@
   "provider_name": "DeepSeek",
   "provider_settings": {
     "DeepSeek": {
-      "api_key": "",
+      "api_key": "sk-33aca45a418f4f49bba28fb53c4f7ed1",
       "base_url": "https://api.deepseek.com/v1",
       "model": "deepseek-v4-flash",
       "timeout_seconds": 90,
