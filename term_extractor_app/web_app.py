@@ -244,7 +244,6 @@ class SettingsPayload(BaseModel):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     timeout_seconds: Optional[int] = None
-    max_concurrency: Optional[int] = None
     disable_system_proxy: Optional[bool] = None
     extraction_mode: Optional[str] = None
     source_language: Optional[str] = None
@@ -1096,7 +1095,6 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             "api_key": provider_settings.api_key if provider_settings else "",
             "base_url": provider_settings.base_url if provider_settings else "",
             "timeout_seconds": provider_settings.timeout_seconds if provider_settings else 90,
-            "max_concurrency": provider_settings.max_concurrency if provider_settings else 1,
             "disable_system_proxy": provider_settings.disable_system_proxy if provider_settings else True,
             "source_language": settings.input_defaults.get("source_language", "中文"),
             "extraction_mode": settings.input_defaults.get("extraction_mode", "terms"),
@@ -1132,8 +1130,6 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
                 provider_settings.base_url = payload.base_url
             if payload.timeout_seconds is not None:
                 provider_settings.timeout_seconds = max(1, int(payload.timeout_seconds))
-            if payload.max_concurrency is not None:
-                provider_settings.max_concurrency = max(1, int(payload.max_concurrency))
             if payload.disable_system_proxy is not None:
                 provider_settings.disable_system_proxy = bool(payload.disable_system_proxy)
             settings.provider_settings[settings.provider_name] = provider_settings
@@ -1206,8 +1202,6 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             provider_settings.base_url = payload.base_url
         if payload.timeout_seconds is not None:
             provider_settings.timeout_seconds = max(1, int(payload.timeout_seconds))
-        if payload.max_concurrency is not None:
-            provider_settings.max_concurrency = max(1, int(payload.max_concurrency))
         if payload.disable_system_proxy is not None:
             provider_settings.disable_system_proxy = bool(payload.disable_system_proxy)
 
@@ -1755,7 +1749,6 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             "provider": settings.get("provider", "DeepSeek"),
             "has_api_key": bool(settings.get("api_key")),
             "selected_model": settings.get("selected_model", ""),
-            "max_concurrency": settings.get("max_concurrency", 6),
             "max_chars_per_request": settings.get("max_chars_per_request", 3000),
             "enable_thinking": bool(settings.get("enable_thinking", False)),
         }
@@ -2317,7 +2310,6 @@ INDEX_HTML = """<!doctype html>
             <label>模型列表<select id="modelName"></select></label>
             <label>API Key<span class="secret-field"><input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." /><button id="saveModelConnectionButton" class="mini-button" type="button">加载模型</button></span></label>
             <label>超时秒数<input id="timeoutSeconds" type="number" min="1" value="90" /></label>
-            <label>最大并发<input id="maxConcurrency" type="number" min="1" value="6" /></label>
             <label class="check"><input id="disableSystemProxy" type="checkbox" checked /> 禁用系统代理</label>
           </div>
           <div class="actions">
@@ -5133,7 +5125,6 @@ function settingsPayload() {
     api_key: $("apiKey").value,
     base_url: currentBaseUrl,
     timeout_seconds: Number($("timeoutSeconds").value || 90),
-    max_concurrency: Number($("maxConcurrency").value || 1),
     disable_system_proxy: $("disableSystemProxy").checked,
     extraction_mode: $("extractionMode").value,
     source_language: $("sourceLanguage").value,
@@ -5159,7 +5150,6 @@ function modelConnectionPayload() {
     api_key: $("apiKey").value,
     base_url: currentBaseUrl,
     timeout_seconds: Number($("timeoutSeconds").value || 90),
-    max_concurrency: Number($("maxConcurrency").value || 1),
     disable_system_proxy: $("disableSystemProxy").checked,
   };
 }
@@ -6808,7 +6798,6 @@ async function loadSettings() {
   $("apiKey").value = data.api_key || "";
   currentBaseUrl = data.base_url || "";
   $("timeoutSeconds").value = data.timeout_seconds || 90;
-  $("maxConcurrency").value = data.max_concurrency || 1;
   $("disableSystemProxy").checked = data.disable_system_proxy !== false;
   $("sourceLanguage").value = data.source_language || "中文";
   $("extractionMode").value = data.extraction_mode || "terms";

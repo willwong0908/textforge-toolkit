@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import traceback
 import threading
-import time
 import uuid
 from typing import Any
 
@@ -13,7 +13,10 @@ from .directional_service import enabled_review_types, get_directional_template
 from .forbidden_service import check_forbidden_words, get_forbidden_template, parse_forbidden_words
 from .output_service import generate_review_excel
 from .prompt_service import get_prompt_template
-from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings, review_chat
+from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings
+from ..models import LLMRequest, LLMResponse
+from ..providers import ProviderRegistry
+from ..scheduler import AdaptiveConcurrencyController, AsyncRequestScheduler
 from ..telemetry import infer_model_tier, track_event
 
 DEFAULT_DIRECTIONAL_SYSTEM_PROMPT = """你是专业翻译审校员。你的任务是按照用户指定的定向审校类型，检查译文相对于原文是否存在对应问题。
@@ -451,39 +454,15 @@ def _run_review_task(task_id: str) -> None:
         _update_task(task_id, cached_count=0, completed_count=0)
 
         packages = _build_packages(request_items, max_chars)
-
-        for index, package in enumerate(packages, start=1):
-            _add_log(task_id, "info", f"请求第 {index}/{len(packages)} 包，包含 {len(package)} 条")
-            try:
-                results = _request_with_retry(task_id, api_key, model, config, package)
-                result_by_id = {str(item.get("id")): item for item in results}
-                for item in package:
-                    if config.get("mode") == "directional":
-                        result = _normalize_directional_result(
-                            result_by_id.get(item["id"]),
-                            item["id"],
-                            config.get("review_types", []),
-                        )
-                    else:
-                        result = _normalize_result(result_by_id.get(item["id"]), item["id"])
-                    _save_review_result(task_id, item["id"], item["cache_key"], "completed", result)
-                    completed_count += 1
-                    requested_count += 1
-            except Exception as exc:
-                message = str(exc)
-                _add_log(task_id, "error", f"第 {index} 包失败：{message}")
-                for item in package:
-                    _save_review_error(task_id, item["id"], item["cache_key"], message)
-                    completed_count += 1
-                    failed_count += 1
-                    requested_count += 1
-
-            _update_task(
-                task_id,
-                requested_count=requested_count,
-                completed_count=completed_count,
-                failed_count=failed_count,
+        requested_count, completed_count, failed_count = asyncio.run(
+            _run_review_packages(
+                task_id=task_id,
+                api_key=api_key,
+                model=model,
+                config=config,
+                packages=packages,
             )
+        )
     else:
         _add_log(task_id, "info", "未启用 AI 审校，跳过 AI 请求")
         for item in items:
@@ -530,67 +509,160 @@ def _run_forbidden_check(task_id: str, items: list[dict[str, Any]], words: list[
     _add_log(task_id, "info", f"禁用词检查完成，命中 {hit_count} 条")
 
 
-def _request_with_retry(
+async def _run_review_packages(
     task_id: str,
     api_key: str,
     model: str,
     config: dict[str, Any],
-    package: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    delays = [2, 5, 10]
-    last_error: Exception | None = None
-    for attempt in range(1, 4):
+    packages: list[list[dict[str, Any]]],
+) -> tuple[int, int, int]:
+    """Run independent review packages concurrently with adaptive backpressure."""
+    if not packages:
+        return 0, 0, 0
+
+    provider_name, provider_settings = _load_review_provider(api_key, model)
+    adapter = ProviderRegistry.create_adapter(provider_name, provider_settings)
+    requests: list[LLMRequest] = []
+    for index, package in enumerate(packages, start=1):
+        payload: dict[str, Any] = {"items": [_payload_item(item) for item in package]}
+        if config.get("mode") == "directional":
+            payload["review_types"] = config.get("review_types", [])
+        source_language = str(config.get("source_language") or "").strip()
+        target_language = str(config.get("target_language") or "").strip()
+        if source_language or target_language:
+            payload["language"] = {"source": source_language, "target": target_language}
+        user_prompt = _build_user_prompt(
+            config,
+            json.dumps(payload, ensure_ascii=False),
+            any(_item_info(item) for item in package),
+        )
+        requests.append(
+            LLMRequest(
+                task_id=f"ai_review_package_{index}",
+                task_type="candidate_review_batch",
+                prompt=user_prompt,
+                messages=[
+                    {"role": "system", "content": config["system_prompt"]},
+                    {"role": "user", "content": user_prompt},
+                ],
+                metadata={
+                    "enable_thinking": bool(config.get("enable_thinking", False)),
+                    "package_index": index,
+                    "package": package,
+                },
+            )
+        )
+
+    requested_count = 0
+    completed_count = 0
+    failed_count = 0
+    counters_lock = threading.Lock()
+
+    def validate_response(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+        if not response.success:
+            return response
         try:
-            payload_items = [
-                _payload_item(item)
-                for item in package
-            ]
-            payload: dict[str, Any] = {"items": payload_items}
-            if config.get("mode") == "directional":
-                payload["review_types"] = config.get("review_types", [])
-            source_language = config.get("source_language", "").strip()
-            target_language = config.get("target_language", "").strip()
-            if source_language or target_language:
-                payload["language"] = {
-                    "source": source_language,
-                    "target": target_language,
-                }
-            text = json.dumps(payload, ensure_ascii=False)
-            user_prompt = _build_user_prompt(config, text, any(_item_info(item) for item in package))
-            _add_log(
-                task_id,
-                "debug",
-                _format_ai_request_log(
-                    attempt=attempt,
-                    model=model,
-                    system_prompt=config["system_prompt"],
-                    user_prompt=user_prompt,
-                    item_count=len(package),
-                ),
-            )
-            content = review_chat(
-                api_key,
-                model,
-                config["system_prompt"],
-                user_prompt,
-                enable_thinking=bool(config.get("enable_thinking", False)),
-            )
-            _add_log(task_id, "debug", "AI 返回内容：\n" + content)
-            parsed = _parse_json_object(content)
-            items = parsed.get("items")
-            if not isinstance(items, list):
+            parsed = _parse_json_object(response.content)
+            if not isinstance(parsed.get("items"), list):
                 raise ReviewTaskError("AI 返回 JSON 中缺少 items 数组")
-            _add_log(task_id, "debug", f"AI 返回校验通过：{len(items)} 条")
-            return items
-        except (SharedProviderError, ReviewTaskError, json.JSONDecodeError) as exc:
-            last_error = exc
-            if attempt < 3:
-                delay = delays[attempt - 1]
-                _add_log(task_id, "warning", f"请求失败，{delay} 秒后重试第 {attempt + 1} 次：{exc}")
-                time.sleep(delay)
-            else:
-                break
-    raise ReviewTaskError(str(last_error or "请求失败"))
+        except (ReviewTaskError, json.JSONDecodeError) as exc:
+            return LLMResponse(
+                task_id=response.task_id,
+                task_type=response.task_type,
+                content=response.content,
+                provider=response.provider,
+                model=response.model,
+                latency_ms=response.latency_ms,
+                attempts=response.attempts,
+                success=False,
+                error=str(exc),
+                error_type="response_validation",
+                retryable=True,
+                response_metadata=response.response_metadata,
+            )
+        return response
+
+    def on_result(request: LLMRequest, response: LLMResponse, snapshot) -> None:
+        nonlocal requested_count, completed_count, failed_count
+        package = list(request.metadata.get("package") or [])
+        package_index = int(request.metadata.get("package_index") or 0)
+        _add_log(task_id, "info", f"第 {package_index}/{len(packages)} 包完成，包含 {len(package)} 条，并发 {snapshot.current_concurrency}")
+        _add_log(
+            task_id,
+            "debug",
+            _format_ai_request_log(
+                attempt=response.attempts,
+                model=model,
+                system_prompt=config["system_prompt"],
+                user_prompt=request.prompt,
+                item_count=len(package),
+            ),
+        )
+        _add_log(task_id, "debug", "AI 返回内容：\n" + str(response.content or ""))
+        if response.success:
+            parsed_items = _parse_json_object(response.content).get("items", [])
+            result_by_id = {str(item.get("id")): item for item in parsed_items if isinstance(item, dict)}
+            for item in package:
+                if config.get("mode") == "directional":
+                    result = _normalize_directional_result(
+                        result_by_id.get(item["id"]), item["id"], config.get("review_types", [])
+                    )
+                else:
+                    result = _normalize_result(result_by_id.get(item["id"]), item["id"])
+                _save_review_result(task_id, item["id"], item["cache_key"], "completed", result)
+            _add_log(task_id, "debug", f"AI 返回校验通过：{len(parsed_items)} 条")
+        else:
+            message = str(response.error or "请求失败")
+            _add_log(task_id, "error", f"第 {package_index} 包失败，已重试 {max(0, response.attempts - 1)} 次：{message}")
+            for item in package:
+                _save_review_error(task_id, item["id"], item["cache_key"], message)
+
+        with counters_lock:
+            requested_count += len(package)
+            completed_count += len(package)
+            if not response.success:
+                failed_count += len(package)
+            _update_task(
+                task_id,
+                requested_count=requested_count,
+                completed_count=completed_count,
+                failed_count=failed_count,
+            )
+
+    original_send_prompt = adapter.send_prompt
+
+    async def logged_send_prompt(request: LLMRequest, attempt: int = 1) -> LLMResponse:
+        package_index = int(request.metadata.get("package_index") or 0)
+        if attempt == 1:
+            _add_log(task_id, "info", f"已发送第 {package_index}/{len(packages)} 包，正在等待模型响应。")
+        else:
+            _add_log(task_id, "warning", f"第 {package_index}/{len(packages)} 包响应无效或请求失败，正在进行第 {attempt} 次请求。")
+        return await original_send_prompt(request, attempt=attempt)
+
+    adapter.send_prompt = logged_send_prompt
+
+    controller = AdaptiveConcurrencyController(mode="自动", user_max=4, provider_max=4)
+    scheduler = AsyncRequestScheduler(
+        adapter=adapter,
+        controller=controller,
+        max_retries=2,
+        stop_requested=lambda: False,
+        response_validator=validate_response,
+    )
+    try:
+        _add_log(task_id, "info", f"开始 AI 审校，共 {len(packages)} 包；自动并发从 2 路启动，最高 4 路。")
+        await scheduler.run(requests, on_result=on_result)
+    finally:
+        await adapter.close()
+    return requested_count, completed_count, failed_count
+
+
+def _load_review_provider(api_key: str, model: str):
+    from .shared_provider import _load_provider_settings
+
+    provider_name, provider_settings = _load_provider_settings(api_key_override=api_key)
+    provider_settings.model = model
+    return provider_name, provider_settings
 
 
 def _build_packages(items: list[dict[str, Any]], max_chars: int) -> list[list[dict[str, Any]]]:

@@ -1884,16 +1884,13 @@ class TermExtractionService:
         result_handler,
         response_validator=None,
     ) -> None:
-        user_max = (
-            self.settings.request_limits["auto_max_concurrency"]
-            if self.settings.request_limits.get("concurrency_mode", "自动") == "自动"
-            else self.settings.request_limits["manual_concurrency"]
-        )
         adapter = ProviderRegistry.create_adapter(provider_name, provider_settings)
         controller = AdaptiveConcurrencyController(
-            mode=self.settings.request_limits.get("concurrency_mode", "自动"),
-            user_max=user_max,
-            provider_max=provider_settings.max_concurrency,
+            # Keep every AI stage within one predictable, self-adjusting limit.
+            # Model connection settings must not make a task unexpectedly serial.
+            mode="自动",
+            user_max=4,
+            provider_max=4,
         )
         scheduler = AsyncRequestScheduler(
             adapter=adapter,

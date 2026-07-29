@@ -11,9 +11,11 @@ dist_clean/
 output/
 program/
 release_bundle/
+.playwright-cli/
 Yeehe_Toolkit_*/
 AI_Term_Extractor_WebUI_Release/
 qa_nontrans_escape/
+settings.json
 
 *.zip
 *.log
