@@ -67,6 +67,14 @@ class DiffExcelTests(unittest.TestCase):
         self.assertEqual(meta.mode_label, "目录对目录")
         self.assertEqual(meta.matched_pairs, 1)
 
+    def test_compare_paths_rejects_paths_without_a_pair(self) -> None:
+        empty_a = os.path.join(self.temp_dir.name, "empty_a")
+        empty_b = os.path.join(self.temp_dir.name, "empty_b")
+        os.makedirs(empty_a, exist_ok=True)
+        os.makedirs(empty_b, exist_ok=True)
+        with self.assertRaisesRegex(ValueError, "未找到可配对"):
+            run_compare_to_cache(empty_a, empty_b)
+
     def test_apply_highlight_to_records_marks_target_workbook(self) -> None:
         diffs = compare_excel_files(self.path_a, self.path_b)
         changed_cells, workbook_count = apply_highlight_to_records(diffs, "A", "#FFD966")
@@ -113,6 +121,11 @@ class DiffExcelTests(unittest.TestCase):
         self.assertEqual(preview["matched_count"], 2)
         self.assertEqual(len(preview["records"]), 2)
 
+        second_page = read_cached_diff_preview(result["cache_file"], limit=1, offset=1)
+        self.assertEqual(second_page["offset"], 1)
+        self.assertEqual(len(second_page["records"]), 1)
+        self.assertEqual(second_page["records"][0]["cell_address"], "C3")
+
     def test_export_and_highlight_from_cache_work_with_query(self) -> None:
         result = run_compare_to_cache(self.path_a, self.path_b, preview_limit=10)
         output_path = os.path.join(self.temp_dir.name, "diff_filtered.xlsx")
@@ -132,6 +145,44 @@ class DiffExcelTests(unittest.TestCase):
             self.assertFalse((worksheet["B2"].fill.start_color.rgb or "").endswith("9DC3E6"))
         finally:
             workbook.close()
+
+    def test_field_match_pairs_rows_across_sheet_names_and_positions(self) -> None:
+        left = Workbook()
+        left_sheet = left.active
+        left_sheet.title = "Left"
+        left_sheet.append(["key", "中文", "英文"])
+        left_sheet.append(["happy", "快乐", "happy"])
+        left_sheet.append(["happy", "开心", "glad"])
+        left_sheet.append(["only-a", "仅A", "A"])
+        left.save(self.path_a)
+        left.close()
+
+        right = Workbook()
+        right_sheet = right.active
+        right_sheet.title = "Different sheet"
+        right_sheet.append(["英文", "key", "中文"])
+        right_sheet.append(["happy", "happy", "快乐"])
+        right_sheet.append(["glad", "happy", "高兴"])
+        right_sheet.append(["B", "only-b", "仅B"])
+        right.save(self.path_b)
+        right.close()
+
+        result = run_compare_to_cache(
+            self.path_a,
+            self.path_b,
+            compare_mode="field_match",
+            reference_field="key",
+            compare_fields=["中文", "英文"],
+            include_unmatched=True,
+        )
+        records = read_cached_diff_preview(result["cache_file"], limit=20)["records"]
+        self.assertEqual(result["meta"]["paired_reference_rows"], 2)
+        self.assertEqual(result["meta"]["unmatched_reference_rows"], 2)
+        self.assertEqual(result["total_count"], 3)
+        self.assertEqual(sum(item["diff_kind"] == "unmatched_reference" for item in records), 2)
+        chinese_diff = next(item for item in records if item["compare_field"] == "中文")
+        self.assertEqual(chinese_diff["value_a"], "开心")
+        self.assertEqual(chinese_diff["value_b"], "高兴")
 
 
 if __name__ == "__main__":

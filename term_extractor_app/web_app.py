@@ -92,6 +92,7 @@ if __package__:
         run_compare_to_cache as run_diff_excel_compare_to_cache,
         scan_field_match_headers as scan_diff_excel_field_match_headers,
     )
+    from .diff_task_service import DiffTaskService
     from .feedback import FeedbackError, feedback_status, submit_feedback
     from .models import TaskInput, normalize_extraction_mode, sync_extraction_flags
     from .open_utils import open_folder as open_path_folder
@@ -196,6 +197,7 @@ else:
         read_cached_diff_preview as read_diff_excel_cached_preview,
         run_compare_to_cache as run_diff_excel_compare_to_cache,
     )
+    from term_extractor_app.diff_task_service import DiffTaskService
     from term_extractor_app.feedback import FeedbackError, feedback_status, submit_feedback
     from term_extractor_app.models import TaskInput, normalize_extraction_mode, sync_extraction_flags
     from term_extractor_app.open_utils import open_folder as open_path_folder
@@ -988,6 +990,7 @@ def _ai_review_excel_upload_response(
 
 def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
     task_facade = facade or ExtractionTaskFacade()
+    diff_task_service = DiffTaskService()
     app = FastAPI(title="AI Term Extractor WebUI")
     init_ai_review_db()
 
@@ -1480,21 +1483,36 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
                 track_event("diff.mode.field_match")
             else:
                 track_event("diff.mode.position")
-            result = run_diff_excel_compare_to_cache(
-                payload.path_a,
-                payload.path_b,
-                compare_mode=payload.compare_mode,
-                reference_field=payload.reference_field,
-                compare_fields=payload.compare_fields,
-                include_unmatched=payload.include_unmatched,
-                ignore_case=False,
-                trim_whitespace=False,
-            )
-            track_event("diff.compare.success")
-            return result
+            def operation(progress_callback):
+                try:
+                    result = run_diff_excel_compare_to_cache(
+                        payload.path_a,
+                        payload.path_b,
+                        compare_mode=payload.compare_mode,
+                        reference_field=payload.reference_field,
+                        compare_fields=payload.compare_fields,
+                        include_unmatched=payload.include_unmatched,
+                        ignore_case=False,
+                        trim_whitespace=False,
+                        progress_callback=progress_callback,
+                    )
+                    track_event("diff.compare.success")
+                    return result
+                except Exception:
+                    track_event("diff.compare.fail")
+                    raise
+
+            return diff_task_service.start(operation).to_dict()
         except Exception as exc:
             track_event("diff.compare.fail")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/diff-excel/task/{task_id}")
+    async def diff_excel_task(task_id: str):
+        task = diff_task_service.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="未找到比对任务。")
+        return task.to_dict()
 
     @app.get("/api/diff-excel/field-match-headers")
     async def diff_excel_field_match_headers(path_a: str, path_b: str):
@@ -1535,9 +1553,9 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/diff-excel/preview")
-    async def diff_excel_preview(cache_file: str, query: str = "", limit: int = 1000):
+    async def diff_excel_preview(cache_file: str, query: str = "", limit: int = 200, offset: int = 0):
         try:
-            return read_diff_excel_cached_preview(cache_file, query=query, limit=limit)
+            return read_diff_excel_cached_preview(cache_file, query=query, limit=limit, offset=offset)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2719,10 +2737,16 @@ INDEX_HTML = """<!doctype html>
         <section class="card">
           <div class="card-title">
             <h3>差异预览</h3>
-            <p>左侧显示 A 中被删掉的内容，右侧显示 B 中新增的内容。</p>
           </div>
-          <div class="pattern-table-wrap">
-            <table class="pattern-table">
+          <div class="pattern-table-wrap diff-preview-table-wrap">
+            <table class="pattern-table diff-preview-table">
+              <colgroup>
+                <col class="diff-preview-file-column" />
+                <col class="diff-preview-file-column" />
+                <col class="diff-preview-sheet-column" />
+                <col class="diff-preview-location-column" />
+                <col class="diff-preview-comparison-column" />
+              </colgroup>
               <thead>
                 <tr id="diffExcelHead">
                   <th>文件 A</th>
@@ -2736,6 +2760,11 @@ INDEX_HTML = """<!doctype html>
                 <tr><td colspan="5" class="empty-cell">暂无差异结果</td></tr>
               </tbody>
             </table>
+          </div>
+          <div class="actions action-row-compact">
+            <button id="diffPreviewPreviousButton" class="secondary" type="button" disabled>上一页</button>
+            <span id="diffPreviewPageLabel" class="hint">暂无结果</span>
+            <button id="diffPreviewNextButton" class="secondary" type="button" disabled>下一页</button>
           </div>
         </section>
       </section>
@@ -3791,6 +3820,33 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .pattern-table tr:last-child td { border-bottom: 0; }
 .pattern-table input[type="text"] { min-height: 36px; }
 .pattern-table input[type="checkbox"] { width: 18px; min-height: 18px; }
+.diff-preview-table-wrap {
+  max-width: 100%;
+  overscroll-behavior-inline: contain;
+}
+.diff-preview-table {
+  width: 100%;
+  min-width: 1240px;
+  table-layout: fixed;
+}
+.diff-preview-file-column { width: 150px; }
+.diff-preview-sheet-column { width: 130px; }
+.diff-preview-location-column { width: 230px; }
+.diff-preview-comparison-column { width: 620px; }
+.diff-preview-table th,
+.diff-preview-table td {
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diff-preview-table td:nth-child(-n + 4) {
+  color: #50657a;
+  line-height: 1.55;
+}
+.diff-preview-table td:last-child {
+  padding: 12px;
+  overflow: visible;
+}
 .compact-rule-table th, .compact-rule-table td { padding: 8px; }
 .compact-rule-table input[type="text"],
 .compact-rule-table select {
@@ -4065,11 +4121,13 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 @media (max-width: 680px) { .diff-header-presence { padding-bottom: 0; } .field-block-head { align-items: flex-start; flex-direction: column; gap: 3px; } .diff-mode-actions { width: 100%; } .diff-mode-select { flex: 1; } }
 .diff-inline-card {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
   gap: 10px;
+  min-width: 0;
 }
 .diff-inline-card.diff-inline-single { grid-template-columns: minmax(0, 1fr); }
 .diff-inline-side {
+  min-width: 0;
   border-radius: 12px;
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -4102,7 +4160,8 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .diff-inline-text {
   color: #24364d;
   line-height: 1.7;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
   white-space: pre-wrap;
 }
 .diff-inline-empty {
@@ -4719,7 +4778,9 @@ let diffExcelState = {
   outputFile: "",
   totalCount: 0,
   matchedCount: 0,
-  previewLimit: 1000,
+  previewLimit: 200,
+  previewOffset: 0,
+  taskId: "",
   previewTruncated: false,
 };
 let diffFieldMatchSettings = {
@@ -5294,7 +5355,7 @@ function renderCrossExcelSearchResults(data) {
 
 function renderDiffExcelSummary() {
   const meta = diffExcelState.meta || {};
-  $("diffModeLabel").textContent = String(meta.mode_label || "未开始");
+  $("diffModeLabel").textContent = String(meta.compare_mode_label || meta.mode_label || "未开始");
   $("diffFilesInA").textContent = Number(meta.files_in_a || 0);
   $("diffFilesInB").textContent = Number(meta.files_in_b || 0);
   $("diffMatchedPairs").textContent = Number(meta.matched_pairs || 0);
@@ -5307,7 +5368,7 @@ function renderDiffExcelSummary() {
       ? `当前只预览前 ${Number(diffExcelState.previewLimit || 1000)} 条，完整结果保存在本地缓存中。`
       : "比对完成后可导出差异结果。";
   $("exportDiffExcelButton").disabled = !diffExcelState.cacheFile || !Number(diffExcelState.totalCount || 0);
-  $("highlightDiffExcelButton").disabled = !(Array.isArray(diffExcelState.previewRecords) && diffExcelState.previewRecords.length);
+  $("highlightDiffExcelButton").disabled = !diffExcelState.cacheFile || !Number(diffExcelState.totalCount || 0);
   $("openDiffOutputFileButton").disabled = !diffExcelState.outputFile;
   $("openDiffOutputFolderButton").disabled = !diffExcelState.outputFile;
 }
@@ -5507,6 +5568,7 @@ function renderDiffExcelResults() {
   if (!records.length) {
     body.innerHTML = '<tr><td colspan="5" class="empty-cell">暂无差异结果</td></tr>';
     renderDiffExcelSummary();
+    renderDiffPreviewPager();
     return;
   }
   records.forEach((item) => {
@@ -5555,11 +5617,12 @@ function renderDiffExcelResults() {
     body.appendChild(tr);
   });
   renderDiffExcelSummary();
+  renderDiffPreviewPager();
 }
 
 function renderDiffExcelResultHead() {
   const head = $("diffExcelHead");
-  const isFieldMatch = String(diffExcelState.meta?.mode_label || "") === "按字段匹配";
+  const isFieldMatch = String(diffExcelState.meta?.compare_mode_label || "") === "按字段匹配";
   const labels = isFieldMatch
     ? ["文件 A", "文件 B", "A / B Sheet", "参考字段与比对字段", "差异对照"]
     : ["文件 A", "文件 B", "Sheet", "单元格", "差异对照"];
@@ -5571,6 +5634,18 @@ function renderDiffExcelResultHead() {
   });
 }
 
+function renderDiffPreviewPager() {
+  const total = Number(diffExcelState.matchedCount || 0);
+  const limit = Number(diffExcelState.previewLimit || 200);
+  const offset = Number(diffExcelState.previewOffset || 0);
+  const shown = Array.isArray(diffExcelState.previewRecords) ? diffExcelState.previewRecords.length : 0;
+  $("diffPreviewPreviousButton").disabled = offset <= 0;
+  $("diffPreviewNextButton").disabled = offset + shown >= total;
+  $("diffPreviewPageLabel").textContent = total
+    ? `显示 ${offset + 1}-${offset + shown} / ${total}`
+    : "暂无结果";
+}
+
 async function applyDiffExcelFilter() {
   if (!diffExcelState.cacheFile) {
     diffExcelState.previewRecords = [];
@@ -5579,11 +5654,20 @@ async function applyDiffExcelFilter() {
     renderDiffExcelResults();
     return;
   }
-  const data = await api(`/api/diff-excel/preview?cache_file=${encodeURIComponent(diffExcelState.cacheFile)}&query=&limit=${encodeURIComponent(String(diffExcelState.previewLimit || 1000))}`);
+  const data = await api(`/api/diff-excel/preview?cache_file=${encodeURIComponent(diffExcelState.cacheFile)}&query=&limit=${encodeURIComponent(String(diffExcelState.previewLimit || 200))}&offset=${encodeURIComponent(String(diffExcelState.previewOffset || 0))}`);
   diffExcelState.previewRecords = Array.isArray(data.records) ? data.records : [];
   diffExcelState.matchedCount = Number(data.matched_count || 0);
   diffExcelState.previewTruncated = Boolean(data.preview_truncated);
+  diffExcelState.previewOffset = Number(data.offset || 0);
   renderDiffExcelResults();
+}
+
+async function changeDiffPreviewPage(direction) {
+  const limit = Number(diffExcelState.previewLimit || 200);
+  const nextOffset = Math.max(0, Number(diffExcelState.previewOffset || 0) + (direction * limit));
+  if (nextOffset === Number(diffExcelState.previewOffset || 0)) return;
+  diffExcelState.previewOffset = nextOffset;
+  await applyDiffExcelFilter();
 }
 
 function clearDiffExcelState() {
@@ -5595,7 +5679,9 @@ function clearDiffExcelState() {
     outputFile: "",
     totalCount: 0,
     matchedCount: 0,
-    previewLimit: 1000,
+    previewLimit: 200,
+    previewOffset: 0,
+    taskId: "",
     previewTruncated: false,
   };
   $("diffExcelHint").textContent = "";
@@ -7763,7 +7849,7 @@ async function startDiffExcel() {
   });
   renderCurrentTaskStatus();
   try {
-    const data = await api("/api/diff-excel/compare", {
+    const started = await api("/api/diff-excel/compare", {
       method: "POST",
       body: JSON.stringify({
         path_a: pathA,
@@ -7774,23 +7860,48 @@ async function startDiffExcel() {
         include_unmatched: diffFieldMatchSettings.includeUnmatched,
       }),
     });
+    const taskId = String(started.task_id || "");
+    if (!taskId) throw new Error("未能启动比对任务。");
+    diffExcelState.taskId = taskId;
+    let data = null;
+    while (true) {
+      const task = await api(`/api/diff-excel/task/${encodeURIComponent(taskId)}`);
+      const message = String(task.message || "正在比对");
+      $("diffExcelHint").textContent = message;
+      setTaskStatus("diffExcelPage", {
+        active: true,
+        taskLabel: "Diff 工具",
+        pill: "运行中",
+        pillClass: "running",
+        stageLabel: compareMode === "field_match" ? "按字段匹配" : "按位置比对",
+        message,
+      });
+      renderCurrentTaskStatus();
+      if (task.status === "completed") {
+        data = task.result || {};
+        break;
+      }
+      if (task.status === "failed") {
+        throw new Error(String(task.error || "比对失败"));
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
     diffExcelState.cacheFile = String(data.cache_file || "");
     diffExcelState.resultId = String(data.result_id || "");
-    diffExcelState.previewRecords = Array.isArray(data.preview_records) ? data.preview_records : [];
+    diffExcelState.previewOffset = 0;
+    diffExcelState.previewRecords = [];
     diffExcelState.meta = data.meta || null;
     diffExcelState.outputFile = "";
     diffExcelState.totalCount = Number(data.total_count || 0);
     diffExcelState.matchedCount = Number(data.total_count || 0);
-    diffExcelState.previewLimit = Number(data.preview_limit || 1000);
+    diffExcelState.previewLimit = 200;
     diffExcelState.previewTruncated = Boolean(data.preview_truncated);
     const meta = diffExcelState.meta || {};
     const fieldSummary = compareMode === "field_match"
       ? `有效参考行 ${Number(meta.valid_reference_rows || 0)}，已配对 ${Number(meta.paired_reference_rows || 0)}，未匹配 ${Number(meta.unmatched_reference_rows || 0)}，跳过字段 ${Number(meta.skipped_field_count || 0)}。`
       : "";
-    $("diffExcelHint").textContent = diffExcelState.previewTruncated
-      ? `比对完成，共找到 ${diffExcelState.totalCount} 处差异，当前仅预览前 ${diffExcelState.previewLimit} 条。`
-      : `比对完成，共找到 ${diffExcelState.totalCount} 处差异。${fieldSummary}`;
-    renderDiffExcelResults();
+    await applyDiffExcelFilter();
+    $("diffExcelHint").textContent = `比对完成，共找到 ${diffExcelState.totalCount} 处差异。${fieldSummary}`;
     setTaskStatus("diffExcelPage", {
       active: false,
       taskLabel: "Diff 工具",
@@ -8029,6 +8140,8 @@ $("searchCrossExcelButton").addEventListener("click", searchCrossExcel);
 $("mergeCrossExcelButton").addEventListener("click", mergeCrossExcel);
 $("startDiffExcelButton").addEventListener("click", startDiffExcel);
 $("clearDiffExcelButton").addEventListener("click", clearDiffExcelState);
+$("diffPreviewPreviousButton").addEventListener("click", () => changeDiffPreviewPage(-1).catch((error) => { $("diffExcelHint").textContent = error.message; }));
+$("diffPreviewNextButton").addEventListener("click", () => changeDiffPreviewPage(1).catch((error) => { $("diffExcelHint").textContent = error.message; }));
 $("diffCompareMode").addEventListener("change", syncDiffCompareModeUi);
 $("diffPathA").addEventListener("input", resetDiffFieldMatchSettings);
 $("diffPathB").addEventListener("input", resetDiffFieldMatchSettings);

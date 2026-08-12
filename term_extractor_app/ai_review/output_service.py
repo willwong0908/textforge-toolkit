@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from .config import OUTPUTS_DIR, ensure_directories
 from .database import get_connection
@@ -28,13 +30,11 @@ def generate_review_excel(task_id: str) -> Path:
     ensure_directories()
     task = _fetch_task(task_id)
     config = task["config"]
-    rows = _fetch_rows(task_id)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = OUTPUTS_DIR / f"review_result_{timestamp}.xlsx"
 
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "审校结果"
+    workbook = Workbook(write_only=True)
+    sheet = workbook.create_sheet("审校结果")
     enable_forbidden = bool(config.get("enable_forbidden_check"))
     if config.get("mode") == "forbidden_only":
         review_type_keys = []
@@ -47,22 +47,13 @@ def generate_review_excel(task_id: str) -> Path:
         headers = NORMAL_HEADERS
     if enable_forbidden and config.get("mode") != "forbidden_only":
         headers.append("禁用词检查情况")
-    sheet.append(headers)
+    _configure_sheet(sheet, headers)
 
-    for row in rows:
+    for row in _iter_rows(task_id):
         location = row["sheet_name"] or row["segment_id"] or ""
         forbidden = row["matched_words"] or ""
         if config.get("mode") == "forbidden_only":
-            sheet.append(
-                [
-                    row["source_file"],
-                    location,
-                    row["row_number"] or "",
-                    row["source_text"] or "",
-                    row["target_text"] or "",
-                    forbidden,
-                ]
-            )
+            sheet.append(_styled_row(sheet, [row["source_file"], location, row["row_number"] or "", row["source_text"] or "", row["target_text"] or "", forbidden]))
             continue
 
         if config.get("mode") == "directional":
@@ -78,7 +69,7 @@ def generate_review_excel(task_id: str) -> Path:
             ]
             if enable_forbidden:
                 values.append(forbidden)
-            sheet.append(values)
+            sheet.append(_styled_row(sheet, values))
             continue
 
         has_issue = ""
@@ -100,16 +91,16 @@ def generate_review_excel(task_id: str) -> Path:
         ]
         if enable_forbidden:
             values.append(forbidden)
-        sheet.append(values)
+        sheet.append(_styled_row(sheet, values))
 
-    _format_sheet(sheet)
     workbook.save(output_path)
+    workbook.close()
     return output_path
 
 
-def _fetch_rows(task_id: str) -> list[Any]:
+def _iter_rows(task_id: str):
     with get_connection() as conn:
-        rows = conn.execute(
+        cursor = conn.execute(
             """
             SELECT r.status, r.has_issue, r.issue_type, r.issue, r.suggestion,
                    r.directional_checks_json, r.error_message,
@@ -123,8 +114,8 @@ def _fetch_rows(task_id: str) -> list[Any]:
             ORDER BY i.item_order ASC
             """,
             (task_id,),
-        ).fetchall()
-    return rows
+        )
+        yield from cursor
 
 
 def _fetch_task(task_id: str) -> dict[str, Any]:
@@ -144,22 +135,34 @@ def _loads_checks(text: str) -> dict[str, str]:
     return data if isinstance(data, dict) else {}
 
 
-def _format_sheet(sheet: Any) -> None:
+def _configure_sheet(sheet: Any, headers: list[str]) -> None:
     header_fill = PatternFill(fill_type="solid", fgColor="EAF2EF")
     header_font = Font(bold=True, color="1D2428")
-    for cell in sheet[1]:
+    header_cells = []
+    for value in headers:
+        cell = WriteOnlyCell(sheet, value=value)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(vertical="top", wrap_text=True)
+        header_cells.append(cell)
+    sheet.append(header_cells)
 
     base_widths = [22, 18, 10, 42, 42]
-    widths = [*base_widths, *([24] * max(0, sheet.max_column - len(base_widths)))]
-    for index, width in enumerate(widths[: sheet.max_column], start=1):
-        sheet.column_dimensions[sheet.cell(row=1, column=index).column_letter].width = width
-
-    for row in sheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
+    widths = [*base_widths, *([24] * max(0, len(headers) - len(base_widths)))]
+    for index, width in enumerate(widths[: len(headers)], start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+
+
+def _styled_row(sheet: Any, values: list[Any]) -> list[WriteOnlyCell]:
+    return [
+        _styled_cell(sheet, value)
+        for value in values
+    ]
+
+
+def _styled_cell(sheet: Any, value: Any) -> WriteOnlyCell:
+    cell = WriteOnlyCell(sheet, value=value)
+    cell.alignment = Alignment(vertical="top", wrap_text=True)
+    return cell

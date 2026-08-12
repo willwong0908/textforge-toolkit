@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell import WriteOnlyCell
 
 from .core import _open_excel_file
+from .excel_streaming import header_map_from_values, is_streamable_excel, open_streaming_workbook
 from .storage import get_app_paths
 
 
@@ -62,18 +63,21 @@ def collect_all_headers(excel_files: Sequence[Path]) -> tuple[List[str], Dict[st
     file_sheet_headers: Dict[str, Dict[str, List[str]]] = {}
 
     for file_path in excel_files:
-        with _open_excel_file(str(file_path)) as excel_file:
-            file_sheet_headers[str(file_path)] = {}
-            for sheet_name in excel_file.sheet_names:
-                df = pd.read_excel(
-                    excel_file,
-                    sheet_name=sheet_name,
-                    nrows=0,
-                    keep_default_na=False,
-                )
-                headers = [str(column) for column in df.columns]
-                file_sheet_headers[str(file_path)][sheet_name] = headers
-                all_headers.update(headers)
+        file_sheet_headers[str(file_path)] = {}
+        if is_streamable_excel(file_path):
+            with open_streaming_workbook(file_path) as workbook:
+                for sheet in workbook.worksheets:
+                    first_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+                    headers = list(header_map_from_values(first_row).keys())
+                    file_sheet_headers[str(file_path)][sheet.title] = headers
+                    all_headers.update(headers)
+        else:
+            with _open_excel_file(str(file_path)) as excel_file:
+                for sheet_name in excel_file.sheet_names:
+                    df = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=0, keep_default_na=False)
+                    headers = [str(column) for column in df.columns]
+                    file_sheet_headers[str(file_path)][sheet_name] = headers
+                    all_headers.update(headers)
 
     return sorted(all_headers), file_sheet_headers
 
@@ -112,43 +116,54 @@ def search_excel_rows(folder_path: str, query: str, limit: int = 300) -> Dict[st
     scanned_rows = 0
 
     for file_path in excel_files:
-        with _open_excel_file(str(file_path)) as excel_file:
-            for sheet_name in excel_file.sheet_names:
-                df = pd.read_excel(
-                    excel_file,
-                    sheet_name=sheet_name,
-                    keep_default_na=False,
-                    header=None,
-                )
-                for row_offset, row_values in enumerate(df.itertuples(index=False, name=None), start=1):
-                    scanned_rows += 1
-                    trimmed = _trim_row_values(row_values)
-                    if not trimmed:
-                        continue
-                    matched_columns = [
-                        index
-                        for index, cell_value in enumerate(trimmed)
-                        if lowered in str(cell_value or "").casefold()
-                    ]
-                    if not matched_columns:
-                        continue
-                    matches.append(
-                        CrossExcelSearchMatch(
-                            file_name=file_path.name,
-                            sheet_name=sheet_name,
-                            row_index=row_offset,
-                            row_values=trimmed,
-                            matched_columns=matched_columns,
+        if is_streamable_excel(file_path):
+            with open_streaming_workbook(file_path) as workbook:
+                source_sheets = ((sheet.title, sheet.iter_rows(values_only=True)) for sheet in workbook.worksheets)
+                for sheet_name, source_rows in source_sheets:
+                    for row_offset, row_values in enumerate(source_rows, start=1):
+                        scanned_rows += 1
+                        trimmed = _trim_row_values(row_values)
+                        if not trimmed:
+                            continue
+                        matched_columns = [index for index, cell_value in enumerate(trimmed) if lowered in str(cell_value or "").casefold()]
+                        if not matched_columns:
+                            continue
+                        matches.append(CrossExcelSearchMatch(file_path.name, sheet_name, row_offset, trimmed, matched_columns))
+                        if len(matches) >= max(1, int(limit or 300)):
+                            return {"query": search_text, "file_count": len(excel_files), "scanned_rows": scanned_rows, "truncated": True, "items": [item.to_dict() for item in matches]}
+        else:
+            with _open_excel_file(str(file_path)) as excel_file:
+                for sheet_name in excel_file.sheet_names:
+                    df = pd.read_excel(excel_file, sheet_name=sheet_name, keep_default_na=False, header=None)
+                    for row_offset, row_values in enumerate(df.itertuples(index=False, name=None), start=1):
+                        scanned_rows += 1
+                        trimmed = _trim_row_values(row_values)
+                        if not trimmed:
+                            continue
+                        matched_columns = [
+                            index
+                            for index, cell_value in enumerate(trimmed)
+                            if lowered in str(cell_value or "").casefold()
+                        ]
+                        if not matched_columns:
+                            continue
+                        matches.append(
+                            CrossExcelSearchMatch(
+                                file_name=file_path.name,
+                                sheet_name=sheet_name,
+                                row_index=row_offset,
+                                row_values=trimmed,
+                                matched_columns=matched_columns,
+                            )
                         )
-                    )
-                    if len(matches) >= max(1, int(limit or 300)):
-                        return {
-                            "query": search_text,
-                            "file_count": len(excel_files),
-                            "scanned_rows": scanned_rows,
-                            "truncated": True,
-                            "items": [item.to_dict() for item in matches],
-                        }
+                        if len(matches) >= max(1, int(limit or 300)):
+                            return {
+                                "query": search_text,
+                                "file_count": len(excel_files),
+                                "scanned_rows": scanned_rows,
+                                "truncated": True,
+                                "items": [item.to_dict() for item in matches],
+                            }
 
     return {
         "query": search_text,
@@ -190,95 +205,59 @@ def merge_excel_files_by_headers(
         raise ValueError("请至少选择一个表头。")
 
     excel_files = get_all_excel_files(folder_path)
-    _, file_sheet_headers = collect_all_headers(excel_files)
-    merged_data: List[pd.DataFrame] = []
-    merged_formats: List[Dict[str, object]] = []
-
-    for file_path in excel_files:
-        file_key = str(file_path)
-        for sheet_name, sheet_headers in (file_sheet_headers.get(file_key) or {}).items():
-            matching_headers = [header for header in headers if header in sheet_headers]
-            if not matching_headers:
-                continue
-
-            with _open_excel_file(str(file_path)) as excel_file:
-                df = pd.read_excel(
-                    excel_file,
-                    sheet_name=sheet_name,
-                    keep_default_na=False,
-                )
-                df.columns = [str(column) for column in df.columns]
-
-            columns_to_keep = [column for column in headers if column in df.columns]
-            if not columns_to_keep:
-                continue
-
-            filtered = df[columns_to_keep].copy()
-            filtered.insert(0, "来源文件", file_path.name)
-            filtered.insert(1, "来源Sheet", sheet_name)
-            merged_data.append(filtered)
-
-            if not apply_format:
-                for _ in range(len(filtered)):
-                    merged_formats.append({column: None for column in filtered.columns})
-                continue
-
-            try:
-                workbook = load_workbook(file_path, data_only=False)
-                worksheet = workbook[sheet_name]
-                header_row = 1
-                header_map: Dict[str, int] = {}
-                for column_index in range(1, worksheet.max_column + 1):
-                    header_value = worksheet.cell(row=header_row, column=column_index).value
-                    normalized = str(header_value).strip() if header_value is not None else ""
-                    for column_name in columns_to_keep:
-                        if column_name.strip() == normalized:
-                            header_map[column_name] = column_index
-                            break
-                for data_row_index in range(2, len(df) + 2):
-                    row_format: Dict[str, object] = {"来源文件": None, "来源Sheet": None}
-                    for column_name in columns_to_keep:
-                        source_column = header_map.get(column_name)
-                        row_format[column_name] = (
-                            worksheet.cell(row=data_row_index, column=source_column)
-                            if source_column
-                            else None
-                        )
-                    merged_formats.append(row_format)
-                workbook.close()
-            except Exception:
-                for _ in range(len(filtered)):
-                    merged_formats.append({column: None for column in filtered.columns})
-
-    if not merged_data:
-        raise ValueError("没有找到包含所选表头的数据。")
-
-    result_df = pd.concat(merged_data, ignore_index=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     output_path = _cross_excel_output_dir() / f"合并结果_{timestamp}.xlsx"
+    workbook = Workbook(write_only=True)
+    worksheet = workbook.create_sheet("合并数据")
+    output_headers = ["来源文件", "来源Sheet", *headers]
+    worksheet.append(output_headers)
+    row_count = 0
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        result_df.to_excel(writer, sheet_name="合并数据", index=False)
+    for file_path in excel_files:
+        if is_streamable_excel(file_path):
+            with open_streaming_workbook(file_path, data_only=False) as source_workbook:
+                for source_sheet in source_workbook.worksheets:
+                    first_row = next(source_sheet.iter_rows(min_row=1, max_row=1), ())
+                    header_map = header_map_from_values([cell.value for cell in first_row])
+                    if not any(header in header_map for header in headers):
+                        continue
+                    for source_row in source_sheet.iter_rows(min_row=2):
+                        result_row = [file_path.name, source_sheet.title]
+                        for header in headers:
+                            source_index = header_map.get(header)
+                            source_cell = source_row[source_index] if source_index is not None and source_index < len(source_row) else None
+                            if apply_format and source_cell is not None:
+                                target_cell = WriteOnlyCell(worksheet, value=source_cell.value)
+                                copy_cell_style(source_cell, target_cell)
+                                result_row.append(target_cell)
+                            else:
+                                result_row.append(source_cell.value if source_cell is not None else None)
+                        worksheet.append(result_row)
+                        row_count += 1
+            continue
 
-    workbook = load_workbook(output_path)
-    worksheet = workbook["合并数据"]
+        # .xls cannot use openpyxl's read-only reader.  Preserve its existing
+        # compatibility behavior while keeping modern Excel files streaming.
+        with _open_excel_file(str(file_path)) as source_workbook:
+            for sheet_name in source_workbook.sheet_names:
+                frame = pd.read_excel(source_workbook, sheet_name=sheet_name, keep_default_na=False)
+                frame.columns = [str(column) for column in frame.columns]
+                if not any(header in frame.columns for header in headers):
+                    continue
+                for row in frame.itertuples(index=False, name=None):
+                    values_by_header = dict(zip(frame.columns, row))
+                    worksheet.append([file_path.name, sheet_name, *[values_by_header.get(header, "") for header in headers]])
+                    row_count += 1
 
-    if apply_format:
-        for row_index, row_format in enumerate(merged_formats, start=2):
-            for column_index, column_name in enumerate(result_df.columns, start=1):
-                target_cell = worksheet.cell(row=row_index, column=column_index)
-                copy_cell_style(row_format.get(column_name), target_cell)
-
-    for column_index, _ in enumerate(result_df.columns, start=1):
-        worksheet.column_dimensions[get_column_letter(column_index)].width = 15
-
+    if not row_count:
+        workbook.close()
+        raise ValueError("没有找到包含所选表头的数据。")
     workbook.save(output_path)
-    workbook.close()
 
     return {
         "output_file": str(output_path),
-        "row_count": int(len(result_df)),
-        "column_count": int(len(result_df.columns)),
+        "row_count": row_count,
+        "column_count": len(output_headers),
         "selected_headers": headers,
         "apply_format": bool(apply_format),
         "output_dir": str(output_path.parent),

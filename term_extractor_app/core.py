@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 import pandas as pd
 
+from .excel_streaming import header_map_from_values, is_streamable_excel, open_streaming_workbook
+
 from .constants import (
     APPROVED_DECISION,
     DEFAULT_RECALL_SCOPES,
@@ -246,13 +248,19 @@ def get_available_headers(folder_path: str, file_type: str) -> List[str]:
         file_path = os.path.join(folder_path, filename)
         try:
             if file_type == "excel" and filename.lower().endswith((".xlsx", ".xls")):
-                xls = _open_excel_file(file_path)
-                try:
-                    for sheet_name in xls.sheet_names:
-                        df = pd.read_excel(xls, sheet_name=sheet_name)
-                        headers.extend([str(column) for column in df.columns])
-                finally:
-                    xls.close()
+                if is_streamable_excel(file_path):
+                    with open_streaming_workbook(file_path) as workbook:
+                        for sheet in workbook.worksheets:
+                            first_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+                            headers.extend(header_map_from_values(first_row).keys())
+                else:
+                    xls = _open_excel_file(file_path)
+                    try:
+                        for sheet_name in xls.sheet_names:
+                            df = pd.read_excel(xls, sheet_name=sheet_name, nrows=0)
+                            headers.extend([str(column) for column in df.columns])
+                    finally:
+                        xls.close()
             elif file_type == "csv" and filename.lower().endswith(".csv"):
                 df = _read_csv(file_path)
                 headers.extend([str(column) for column in df.columns])
@@ -330,6 +338,34 @@ def read_source_records(
 
 def _read_excel_records(file_path: str, header_name: str) -> List[SourceRecord]:
     collected: List[SourceRecord] = []
+    if is_streamable_excel(file_path):
+        with open_streaming_workbook(file_path) as workbook:
+            for sheet in workbook.worksheets:
+                first_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+                columns = header_map_from_values(first_row)
+                column_index = columns.get(header_name)
+                if column_index is None:
+                    continue
+                for row_index, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+                    value = row[column_index] if column_index < len(row) else None
+                    text = _clean_text(value)
+                    if not text:
+                        continue
+                    collected.append(
+                        SourceRecord(
+                            record_id="{0}:{1}:{2}:{3}".format(
+                                os.path.basename(file_path), sheet.title, row_index, header_name
+                            ),
+                            file_name=os.path.basename(file_path),
+                            source_type="excel",
+                            sheet_or_unit=str(sheet.title),
+                            row_index=row_index,
+                            column_name=str(header_name),
+                            text=text,
+                        )
+                    )
+        return collected
+
     xls = _open_excel_file(file_path)
     try:
         for sheet_name in xls.sheet_names:

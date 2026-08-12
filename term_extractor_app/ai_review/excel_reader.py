@@ -6,6 +6,8 @@ from typing import Any
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
+from ..excel_streaming import open_streaming_workbook
+
 
 def _cell_to_text(value: Any) -> str:
     if value is None:
@@ -34,10 +36,20 @@ def _sheet_columns(sheet: Any) -> list[dict[str, Any]]:
 
 
 def read_excel_headers(path: Path) -> dict[str, Any]:
-    # Some files carry a stale worksheet dimension such as A1:D1501 even though
-    # later columns have real values. Normal mode recalculates the used range,
-    # while read-only mode trusts the stale dimension and can hide columns.
-    workbook = load_workbook(path, read_only=False, data_only=True)
+    try:
+        with open_streaming_workbook(path) as workbook:
+            return _read_headers_from_workbook(workbook)
+    except Exception:
+        # A small number of malformed exports cannot be traversed in read-only
+        # mode.  Preserve the old compatibility path for those files only.
+        workbook = load_workbook(path, read_only=False, data_only=True)
+        try:
+            return _read_headers_from_workbook(workbook)
+        finally:
+            workbook.close()
+
+
+def _read_headers_from_workbook(workbook: Any) -> dict[str, Any]:
     headers_by_sheet: dict[str, list[str]] = {}
     columns_by_sheet: dict[str, list[dict[str, Any]]] = {}
     ordered_headers: list[str] = []
@@ -53,7 +65,6 @@ def read_excel_headers(path: Path) -> dict[str, Any]:
                 seen.add(header)
                 ordered_headers.append(header)
 
-    workbook.close()
     if not any(columns_by_sheet.values()):
         raise ValueError("没有读取到可用列，请确认 Excel 中存在非空列")
 
