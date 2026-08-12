@@ -2845,8 +2845,16 @@ INDEX_HTML = """<!doctype html>
               <h3>读取预览</h3>
               <p>预览前 5 条，检查原文和译文是否对应。</p>
             </div>
-            <div class="pattern-table-wrap">
-              <table class="pattern-table">
+            <div class="pattern-table-wrap review-input-table-wrap">
+              <table class="pattern-table review-input-table">
+                <colgroup>
+                  <col class="review-input-file-column" />
+                  <col class="review-input-location-column" />
+                  <col class="review-input-row-column" />
+                  <col class="review-input-text-column" />
+                  <col class="review-input-text-column" />
+                  <col class="review-input-hint-column" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>来源文件</th>
@@ -2917,8 +2925,8 @@ INDEX_HTML = """<!doctype html>
             </div>
             <button id="openReviewDetailButton" class="secondary" type="button" disabled>详情</button>
           </div>
-          <div class="pattern-table-wrap">
-            <table class="pattern-table">
+          <div class="pattern-table-wrap review-result-table-wrap">
+            <table class="pattern-table review-result-table">
               <thead id="reviewResultHead">
                 <tr>
                   <th>原文</th>
@@ -3846,6 +3854,47 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .diff-preview-table td:last-child {
   padding: 12px;
   overflow: visible;
+}
+.review-input-table-wrap,
+.review-result-table-wrap {
+  max-width: 100%;
+  overscroll-behavior-inline: contain;
+}
+.review-input-table {
+  width: 100%;
+  min-width: 1260px;
+  table-layout: fixed;
+}
+.review-input-file-column { width: 170px; }
+.review-input-location-column { width: 150px; }
+.review-input-row-column { width: 78px; }
+.review-input-text-column { width: 350px; }
+.review-input-hint-column { width: 150px; }
+.review-input-table th,
+.review-input-table td,
+.review-result-table th,
+.review-result-table td {
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+.review-input-table td:nth-child(-n + 3),
+.review-input-table td:last-child {
+  color: #50657a;
+}
+.review-result-table {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+}
+.review-result-table th,
+.review-result-table td {
+  min-width: 0;
+}
+.review-result-table th:nth-child(3),
+.review-result-table td:nth-child(3) {
+  text-align: center;
 }
 .compact-rule-table th, .compact-rule-table td { padding: 8px; }
 .compact-rule-table input[type="text"],
@@ -6425,6 +6474,22 @@ function renderAiReviewResultHead(task) {
   if (hasForbidden && !isForbiddenOnly) {
     headers.push("禁用词检查情况");
   }
+  const table = $("reviewResultBody").closest("table");
+  const textColumnWidth = 300;
+  const widths = isForbiddenOnly
+    ? [420, 420, 300]
+    : isDirectional
+      ? [320, 320, 320, ...reviewTypes.map(() => 240), ...(hasForbidden ? [240] : [])]
+      : [300, 300, 88, 150, 260, 300, ...(hasForbidden ? [240] : [])];
+  table.style.minWidth = `${widths.reduce((total, width) => total + width, 0)}px`;
+  table.querySelector("colgroup")?.remove();
+  const colgroup = document.createElement("colgroup");
+  widths.forEach((width, index) => {
+    const col = document.createElement("col");
+    col.style.width = `${width || textColumnWidth}px`;
+    colgroup.appendChild(col);
+  });
+  table.insertBefore(colgroup, table.firstChild);
   const head = $("reviewResultHead");
   head.innerHTML = "";
   const tr = document.createElement("tr");
