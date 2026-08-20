@@ -1803,8 +1803,11 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
 
     @app.post("/api/ai-review/excel-mapping-presets")
     async def ai_review_save_excel_mapping_preset(payload: AIReviewExcelMappingPresetSavePayload):
-        preset = save_excel_mapping_preset(payload.name, payload.mapping, payload.id)
-        return {"ok": True, "message": "Excel 列映射预设已保存", "preset": preset}
+        try:
+            preset = save_excel_mapping_preset(payload.name, payload.mapping, payload.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "message": "Excel 映射模板已保存", "preset": preset}
 
     @app.delete("/api/ai-review/excel-mapping-presets/{preset_id}")
     async def ai_review_delete_excel_mapping_preset(preset_id: str):
@@ -1812,7 +1815,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             delete_excel_mapping_preset(preset_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {"ok": True, "message": "Excel 列映射预设已删除"}
+        return {"ok": True, "message": "Excel 映射模板已删除"}
 
     @app.get("/api/ai-review/prompt-templates")
     async def ai_review_prompt_templates():
@@ -3185,26 +3188,37 @@ INDEX_HTML = """<!doctype html>
           <input id="mappingTargetLanguageInput" type="text" />
         </div>
       </div>
-      <div class="grid two hidden">
-        <div class="field">
-          <label for="excelMappingPresetSelect">映射预设</label>
-          <select id="excelMappingPresetSelect"></select>
-        </div>
-        <div class="field">
-          <label for="excelMappingPresetNameInput">预设名称</label>
-          <input id="excelMappingPresetNameInput" type="text" placeholder="输入预设名称" />
-        </div>
+      <div class="mapping-template-bar">
+        <label for="excelMappingPresetSelect">映射模板</label>
+        <select id="excelMappingPresetSelect" title="选择后立即套用"></select>
+        <button id="saveExcelMappingPresetButton" class="secondary" type="button">保存当前映射</button>
+        <button id="deleteExcelMappingPresetButton" class="icon-button danger mapping-template-delete" type="button" aria-label="删除模板" title="删除当前模板" disabled>&#128465;</button>
       </div>
-      <div class="actions hidden">
-        <button id="applyExcelMappingPresetButton" class="secondary" type="button">应用预设</button>
-        <button id="saveExcelMappingPresetButton" class="secondary" type="button">保存预设</button>
-        <button id="deleteExcelMappingPresetButton" class="danger" type="button">删除预设</button>
-      </div>
+      <p id="excelMappingPresetHint" class="mapping-template-hint" aria-live="polite"></p>
       <div id="excelSheetTabs" class="sheet-tabs"></div>
       <div id="excelMappingColumns" class="excel-mapping-columns"></div>
       <div class="dialog-actions">
         <button id="applyExcelMappingButton" type="button">确认读取</button>
         <button id="cancelExcelMappingDialogButton" class="secondary" type="button">取消</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="excelMappingPresetDialog" class="dialog compact-dialog">
+    <form method="dialog" class="dialog-body">
+      <div class="dialog-head">
+        <div>
+          <h2>保存映射模板</h2>
+        </div>
+        <button id="closeExcelMappingPresetDialogButton" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="field">
+        <label for="excelMappingPresetNameInput">模板名称</label>
+        <input id="excelMappingPresetNameInput" type="text" maxlength="80" autocomplete="off" />
+      </div>
+      <p id="excelMappingPresetSaveHint" class="mapping-template-hint" aria-live="polite"></p>
+      <div class="dialog-actions">
+        <button id="confirmExcelMappingPresetButton" type="button">保存</button>
+        <button id="cancelExcelMappingPresetDialogButton" class="secondary" type="button">取消</button>
       </div>
     </form>
   </dialog>
@@ -4472,6 +4486,7 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 }
 .dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
 .wide-dialog { width: min(1120px, calc(100vw - 36px)); }
+.compact-dialog { width: min(460px, calc(100vw - 36px)); }
 .dialog-body {
   display: grid;
   gap: 16px;
@@ -4554,6 +4569,22 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   background: #e8f2ef;
   color: var(--primary-strong);
 }
+.mapping-template-bar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fbfd;
+}
+.mapping-template-bar label { color: var(--muted); font-weight: 700; white-space: nowrap; }
+.mapping-template-bar select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mapping-template-bar button { min-height: 36px; white-space: nowrap; }
+.mapping-template-delete { width: 36px; border-radius: 10px; font-size: 17px; }
+.mapping-template-hint { min-height: 0; margin: -7px 0 0; color: var(--danger); font-size: 13px; line-height: 1.5; }
+.mapping-template-hint:empty { display: none; }
 .excel-mapping-columns {
   display: grid;
   gap: 10px;
@@ -4788,6 +4819,9 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   .hero-side { justify-items: stretch; }
   .modal-card { padding: 18px; }
   .modal-footer { align-items: stretch; }
+  .mapping-template-bar { grid-template-columns: 1fr auto; }
+  .mapping-template-bar label { grid-column: 1 / -1; }
+  .mapping-template-bar .secondary { grid-column: 1 / 2; }
 }
 """
 
@@ -4855,6 +4889,7 @@ let aiReviewSheetNames = [];
 let aiReviewColumnsBySheet = {};
 let aiReviewExcelMappingState = {};
 let aiReviewActiveSheetName = "";
+let aiReviewMappingTemplateIssues = [];
 let aiReviewIssueResults = [];
 let aiReviewFollowupState = { taskId: "", resultId: "", item: null, messages: [] };
 const TASK_STATUS_BY_PAGE = {
@@ -5814,9 +5849,16 @@ function initializeAiReviewExcelMapping(data) {
   aiReviewColumnsBySheet = data?.columns_by_sheet || {};
   aiReviewActiveSheetName = aiReviewSheetNames[0] || "";
   aiReviewExcelMappingState = {};
+  aiReviewMappingTemplateIssues = [];
   aiReviewSheetNames.forEach((sheetName) => {
     aiReviewExcelMappingState[sheetName] = { sources: [], targets: {}, infos: {} };
   });
+  if ($("excelMappingPresetSelect")) {
+    $("excelMappingPresetSelect").value = "";
+  }
+  if ($("excelMappingPresetHint")) {
+    $("excelMappingPresetHint").textContent = "";
+  }
   $("excelMappingSummary").textContent = "";
 }
 
@@ -5921,17 +5963,48 @@ function summarizeAiReviewExcelMapping(mapping) {
 
 function renderAiReviewExcelMappingPresets() {
   const select = $("excelMappingPresetSelect");
+  const selectedId = String(select.value || "");
   select.innerHTML = "";
-  select.appendChild(new Option("选择预设", ""));
+  select.appendChild(new Option("选择模板", ""));
   aiReviewExcelMappingPresets.forEach((item) => {
-    select.appendChild(new Option(String(item.name || ""), String(item.id || "")));
+    const option = new Option(String(item.name || ""), String(item.id || ""));
+    option.title = String(item.name || "");
+    select.appendChild(option);
   });
+  select.value = selectedId;
+  $("deleteExcelMappingPresetButton").disabled = !select.value;
 }
 
-async function loadAiReviewExcelMappingPresets() {
+async function loadAiReviewExcelMappingPresets(selectedId = "") {
   const data = await api("/api/ai-review/excel-mapping-presets");
   aiReviewExcelMappingPresets = Array.isArray(data.presets) ? data.presets : [];
   renderAiReviewExcelMappingPresets();
+  if (selectedId) {
+    $("excelMappingPresetSelect").value = String(selectedId);
+  }
+  $("deleteExcelMappingPresetButton").disabled = !$("excelMappingPresetSelect").value;
+}
+
+function excelMappingColumnLetter(columnIndex) {
+  let value = Number(columnIndex) + 1;
+  let result = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    value = Math.floor((value - 1) / 26);
+  }
+  return result || "?";
+}
+
+function renderAiReviewMappingTemplateIssues() {
+  const hint = $("excelMappingPresetHint");
+  hint.textContent = aiReviewMappingTemplateIssues.join(" ");
+}
+
+function clearAiReviewMappingTemplateIssues() {
+  if (!aiReviewMappingTemplateIssues.length) return;
+  aiReviewMappingTemplateIssues = [];
+  renderAiReviewMappingTemplateIssues();
 }
 
 function aiReviewColumnLabel(sheetName, columnIndex) {
@@ -6028,19 +6101,23 @@ function renderAiReviewExcelMappingColumns() {
     categoryInput.disabled = infoSelect.disabled || !infoSelect.value;
     row.querySelector(".mapping-source").addEventListener("change", () => {
       clearAiReviewTaskHint();
+      clearAiReviewMappingTemplateIssues();
       syncAiReviewActiveSheetMapping();
       renderAiReviewExcelMappingDialog();
     });
     targetSelect.addEventListener("change", () => {
       clearAiReviewTaskHint();
+      clearAiReviewMappingTemplateIssues();
       if (targetSelect.value !== "") {
         infoSelect.value = "";
         categoryInput.disabled = true;
       }
       syncAiReviewActiveSheetMapping();
+      renderAiReviewExcelMappingDialog();
     });
     infoSelect.addEventListener("change", () => {
       clearAiReviewTaskHint();
+      clearAiReviewMappingTemplateIssues();
       if (infoSelect.value !== "") {
         targetSelect.value = "";
         categoryInput.disabled = false;
@@ -6048,10 +6125,13 @@ function renderAiReviewExcelMappingColumns() {
         categoryInput.disabled = infoSelect.disabled;
       }
       syncAiReviewActiveSheetMapping();
+      renderAiReviewExcelMappingDialog();
     });
     categoryInput.addEventListener("input", () => {
       clearAiReviewTaskHint();
+      clearAiReviewMappingTemplateIssues();
       syncAiReviewActiveSheetMapping();
+      $("applyExcelMappingButton").disabled = validateAiReviewExcelMapping(buildAiReviewExcelMapping()).length > 0;
     });
     container.appendChild(row);
   });
@@ -6060,6 +6140,9 @@ function renderAiReviewExcelMappingColumns() {
 function renderAiReviewExcelMappingDialog() {
   renderAiReviewExcelSheetTabs();
   renderAiReviewExcelMappingColumns();
+  renderAiReviewMappingTemplateIssues();
+  const mapping = buildAiReviewExcelMapping();
+  $("applyExcelMappingButton").disabled = validateAiReviewExcelMapping(mapping).length > 0;
 }
 
 function buildAiReviewExcelMapping() {
@@ -6086,8 +6169,8 @@ function buildAiReviewExcelMapping() {
   };
 }
 
-function validateAiReviewExcelMapping(mapping) {
-  const errors = [];
+function validateAiReviewExcelMapping(mapping, { includeTemplateIssues = true } = {}) {
+  const errors = includeTemplateIssues ? [...aiReviewMappingTemplateIssues] : [];
   (mapping.sheets || []).forEach((sheet) => {
     const usedTargets = new Set();
     (sheet.mappings || []).forEach((item) => {
@@ -6119,31 +6202,50 @@ function validateAiReviewExcelMapping(mapping) {
 function applyAiReviewExcelMappingPresetToState(mapping) {
   $("mappingSourceLanguageInput").value = String(mapping?.source_language || "");
   $("mappingTargetLanguageInput").value = String(mapping?.target_language || "");
+  const issues = [];
   const nextState = {};
   aiReviewSheetNames.forEach((sheetName) => {
     nextState[sheetName] = { sources: [], targets: {}, infos: {} };
   });
-  (mapping?.sheets || []).forEach((sheet) => {
-    if (!nextState[sheet.sheet_name]) return;
-    const validColumns = new Set((aiReviewColumnsBySheet[sheet.sheet_name] || []).map((column) => Number(column.index)));
+  (mapping?.sheets || []).forEach((sheet, sheetIndex) => {
+    const sheetName = aiReviewSheetNames[sheetIndex];
+    if (!sheetName) {
+      issues.push(`模板需要第 ${sheetIndex + 1} 个工作表，当前文件只有 ${aiReviewSheetNames.length} 个工作表。`);
+      return;
+    }
+    const validColumns = new Set((aiReviewColumnsBySheet[sheetName] || []).map((column) => Number(column.index)));
     (sheet.mappings || []).forEach((item) => {
-      if (!validColumns.has(Number(item.source_column)) || !validColumns.has(Number(item.target_column))) return;
-      nextState[sheet.sheet_name].sources.push(Number(item.source_column));
-      nextState[sheet.sheet_name].targets[Number(item.target_column)] = Number(item.source_column);
+      const sourceColumn = Number(item.source_column);
+      const targetColumn = Number(item.target_column);
+      if (!validColumns.has(sourceColumn)) {
+        issues.push(`第 ${sheetIndex + 1} 个工作表缺少模板需要的 ${excelMappingColumnLetter(sourceColumn)} 列。`);
+        return;
+      }
+      if (!validColumns.has(targetColumn)) {
+        issues.push(`第 ${sheetIndex + 1} 个工作表缺少模板需要的 ${excelMappingColumnLetter(targetColumn)} 列。`);
+        return;
+      }
+      nextState[sheetName].sources.push(sourceColumn);
+      nextState[sheetName].targets[targetColumn] = sourceColumn;
       (item.info_columns || []).forEach((info) => {
-        if (!validColumns.has(Number(info.column))) return;
-        const current = nextState[sheet.sheet_name].infos[Number(info.column)] || { sourceColumns: [], category: String(info.category || "") };
-        if (!current.sourceColumns.includes(Number(item.source_column))) {
-          current.sourceColumns.push(Number(item.source_column));
+        const infoColumn = Number(info.column);
+        if (!validColumns.has(infoColumn)) {
+          issues.push(`第 ${sheetIndex + 1} 个工作表缺少模板需要的 ${excelMappingColumnLetter(infoColumn)} 列。`);
+          return;
+        }
+        const current = nextState[sheetName].infos[infoColumn] || { sourceColumns: [], category: String(info.category || "") };
+        if (!current.sourceColumns.includes(sourceColumn)) {
+          current.sourceColumns.push(sourceColumn);
         }
         if (info.category && !current.category) {
           current.category = String(info.category);
         }
-        nextState[sheet.sheet_name].infos[Number(info.column)] = current;
+        nextState[sheetName].infos[infoColumn] = current;
       });
     });
   });
   aiReviewExcelMappingState = nextState;
+  aiReviewMappingTemplateIssues = [...new Set(issues)];
 }
 
 async function openAiReviewExcelMappingDialog() {
@@ -6151,6 +6253,7 @@ async function openAiReviewExcelMappingDialog() {
     throw new Error("请先读取 Excel 文件");
   }
   clearAiReviewTaskHint();
+  await loadAiReviewExcelMappingPresets();
   $("mappingSourceLanguageInput").value = $("sourceLanguageInput").value || "";
   $("mappingTargetLanguageInput").value = $("targetLanguageInput").value || "";
   renderAiReviewExcelMappingDialog();
@@ -6181,44 +6284,73 @@ async function applyAiReviewExcelMapping() {
   renderAiReviewBatch(data);
 }
 
-async function saveAiReviewExcelMappingPreset() {
+function openAiReviewExcelMappingPresetDialog() {
   const mapping = buildAiReviewExcelMapping();
-  const errors = validateAiReviewExcelMapping(mapping);
+  const errors = validateAiReviewExcelMapping(mapping, { includeTemplateIssues: false });
   if (errors.length) {
     throw new Error(errors[0]);
+  }
+  $("excelMappingPresetNameInput").value = "";
+  $("excelMappingPresetSaveHint").textContent = "";
+  $("excelMappingPresetDialog").showModal();
+  $("excelMappingPresetNameInput").focus();
+}
+
+async function saveAiReviewExcelMappingPreset() {
+  const mapping = buildAiReviewExcelMapping();
+  const errors = validateAiReviewExcelMapping(mapping, { includeTemplateIssues: false });
+  if (errors.length) {
+    throw new Error(errors[0]);
+  }
+  const name = $("excelMappingPresetNameInput").value.trim();
+  if (!name) {
+    throw new Error("请输入模板名称");
+  }
+  const existing = aiReviewExcelMappingPresets.find((item) => String(item.name || "").trim().toLowerCase() === name.toLowerCase());
+  let presetId = null;
+  if (existing) {
+    if (!window.confirm(`已存在“${existing.name}”，是否覆盖？`)) {
+      return;
+    }
+    presetId = String(existing.id || "") || null;
   }
   const data = await api("/api/ai-review/excel-mapping-presets", {
     method: "POST",
     body: JSON.stringify({
-      id: null,
-      name: $("excelMappingPresetNameInput").value.trim() || "未命名映射预设",
+      id: presetId,
+      name,
       mapping,
     }),
   });
-  await loadAiReviewExcelMappingPresets();
-  $("excelMappingPresetSelect").value = String(data?.preset?.id || "");
+  const savedId = String(data?.preset?.id || "");
+  await loadAiReviewExcelMappingPresets(savedId);
+  $("excelMappingPresetDialog").close();
+  $("excelMappingPresetHint").textContent = "映射模板已保存。";
 }
 
 async function applyAiReviewExcelMappingPreset() {
   const presetId = $("excelMappingPresetSelect").value;
-  if (!presetId) return;
+  $("deleteExcelMappingPresetButton").disabled = !presetId;
+  if (!presetId) {
+    clearAiReviewMappingTemplateIssues();
+    return;
+  }
   const data = await api(`/api/ai-review/excel-mapping-presets/${encodeURIComponent(presetId)}`);
   applyAiReviewExcelMappingPresetToState(data?.preset?.mapping || {});
-  $("excelMappingPresetNameInput").value = String(data?.preset?.name || "");
   renderAiReviewExcelMappingDialog();
 }
 
 async function deleteAiReviewExcelMappingPreset() {
   const presetId = $("excelMappingPresetSelect").value;
   if (!presetId) return;
-  if (!window.confirm("确定删除这个映射预设吗？")) {
+  if (!window.confirm("确定删除这个映射模板吗？")) {
     return;
   }
   await api(`/api/ai-review/excel-mapping-presets/${encodeURIComponent(presetId)}`, {
     method: "DELETE",
   });
-  $("excelMappingPresetNameInput").value = "";
   await loadAiReviewExcelMappingPresets();
+  $("excelMappingPresetHint").textContent = "映射模板已删除。";
 }
 
 function fillAiReviewPromptDialog(template = {}) {
@@ -8348,15 +8480,31 @@ $("closeForbiddenDialogButton").addEventListener("click", () => $("forbiddenDial
 $("applyExcelMappingButton").addEventListener("click", () => applyAiReviewExcelMapping().catch((error) => {
   $("reviewTaskHint").textContent = error.message;
 }));
-$("saveExcelMappingPresetButton").addEventListener("click", () => saveAiReviewExcelMappingPreset().catch((error) => {
-  $("reviewTaskHint").textContent = error.message;
+$("saveExcelMappingPresetButton").addEventListener("click", () => {
+  try {
+    openAiReviewExcelMappingPresetDialog();
+  } catch (error) {
+    $("excelMappingPresetHint").textContent = error.message;
+  }
+});
+$("confirmExcelMappingPresetButton").addEventListener("click", () => saveAiReviewExcelMappingPreset().catch((error) => {
+  $("excelMappingPresetSaveHint").textContent = error.message;
 }));
-$("applyExcelMappingPresetButton").addEventListener("click", () => applyAiReviewExcelMappingPreset().catch((error) => {
-  $("reviewTaskHint").textContent = error.message;
+$("excelMappingPresetNameInput").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  saveAiReviewExcelMappingPreset().catch((error) => {
+    $("excelMappingPresetSaveHint").textContent = error.message;
+  });
+});
+$("excelMappingPresetSelect").addEventListener("change", () => applyAiReviewExcelMappingPreset().catch((error) => {
+  $("excelMappingPresetHint").textContent = error.message;
 }));
 $("deleteExcelMappingPresetButton").addEventListener("click", () => deleteAiReviewExcelMappingPreset().catch((error) => {
-  $("reviewTaskHint").textContent = error.message;
+  $("excelMappingPresetHint").textContent = error.message;
 }));
+$("cancelExcelMappingPresetDialogButton").addEventListener("click", () => $("excelMappingPresetDialog").close());
+$("closeExcelMappingPresetDialogButton").addEventListener("click", () => $("excelMappingPresetDialog").close());
 $("cancelExcelMappingDialogButton").addEventListener("click", () => $("excelMappingDialog").close());
 $("closeExcelMappingDialogButton").addEventListener("click", () => $("excelMappingDialog").close());
 $("openOutputDirButton").addEventListener("click", () => openAiReviewOutputDir().catch((error) => {
