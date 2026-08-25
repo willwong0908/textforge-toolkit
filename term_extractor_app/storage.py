@@ -155,8 +155,9 @@ def build_default_settings() -> AppSettings:
             "numeric_normalization_mode": "duplicate_group_only",
             "single_occurrence_approved_policy": "allow_to_library",
             "nontrans_stage_settings": {
-                "chunk_char_limit": 3000,
-                "enable_thinking": False,
+                "chunk_char_limit": 20000,
+                "enable_thinking": True,
+                "reasoning_effort": "low",
                 "builtin_regex_enabled": True,
                 "ai_discovery_enabled": True,
                 "ai_regex_generation_enabled": True,
@@ -192,13 +193,15 @@ def build_default_settings() -> AppSettings:
             ],
             "term_recall_stage_settings": {
                 "single_item_char_limit": 500,
-                "batch_request_char_limit": 3000,
-                "enable_thinking": False,
+                "batch_request_char_limit": 20000,
+                "enable_thinking": True,
+                "reasoning_effort": "low",
             },
             "term_review_stage_settings": {
-                "batch_request_char_limit": 3000,
+                "batch_request_char_limit": 20000,
                 "max_context_chars": 220,
-                "enable_thinking": False,
+                "enable_thinking": True,
+                "reasoning_effort": "low",
             },
             "ai_review_stage_settings": {
                 "batch_request_char_limit": 20000,
@@ -551,6 +554,21 @@ class SettingsStore:
             settings.input_defaults["term_review_stage_settings"].setdefault(key, legacy_term_stage.get(key, value))
         for key, value in defaults.input_defaults["ai_review_stage_settings"].items():
             settings.input_defaults["ai_review_stage_settings"].setdefault(key, value)
+        for stage_key, limit_key in (
+            ("nontrans_stage_settings", "chunk_char_limit"),
+            ("term_recall_stage_settings", "batch_request_char_limit"),
+            ("term_review_stage_settings", "batch_request_char_limit"),
+        ):
+            stage = settings.input_defaults[stage_key]
+            try:
+                configured_limit = int(stage.get(limit_key) or 0)
+            except (TypeError, ValueError):
+                configured_limit = 0
+            if configured_limit <= 6000:
+                stage[limit_key] = 20000
+            stage["enable_thinking"] = True
+            effort = str(stage.get("reasoning_effort") or "").strip().lower()
+            stage["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
         ai_review_stage = settings.input_defaults["ai_review_stage_settings"]
         try:
             configured_ai_review_limit = int(ai_review_stage.get("batch_request_char_limit") or 0)
@@ -560,8 +578,10 @@ class SettingsStore:
             ai_review_stage["batch_request_char_limit"] = 20000
         ai_review_stage["enable_thinking"] = True
         ai_review_stage["workspace_enable_thinking"] = True
-        if str(ai_review_stage.get("reasoning_effort") or "").strip().lower() not in {"low", "high", "max"}:
-            ai_review_stage["reasoning_effort"] = "low"
+        ai_review_effort = str(ai_review_stage.get("reasoning_effort") or "").strip().lower()
+        ai_review_stage["reasoning_effort"] = (
+            "high" if ai_review_effort == "max" else ai_review_effort if ai_review_effort in {"low", "medium", "high"} else "low"
+        )
         for key, value in defaults.input_defaults["term_stage_settings"].items():
             settings.input_defaults["term_stage_settings"].setdefault(key, value)
 

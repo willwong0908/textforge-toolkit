@@ -369,11 +369,17 @@ class OpenAICompatibleAdapter:
             "temperature": 0.0 if self._is_json_batch_task(request) else 0.2,
         }
         metadata = dict(getattr(request, "metadata", {}) or {})
+        provider_identity = f"{self.provider_name} {self.settings.base_url}".lower()
+        is_deepseek = "deepseek" in provider_identity
         if "enable_thinking" in metadata:
-            payload["enable_thinking"] = bool(metadata.get("enable_thinking"))
+            enabled = bool(metadata.get("enable_thinking"))
+            if is_deepseek:
+                payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
+            else:
+                payload["enable_thinking"] = enabled
         if "thinking" in metadata:
             payload["thinking"] = metadata.get("thinking")
-        if "reasoning_effort" in metadata:
+        if is_deepseek and "reasoning_effort" in metadata:
             payload["reasoning_effort"] = str(metadata.get("reasoning_effort") or "low")
         if use_json_response_format and self._is_json_batch_task(request):
             payload["response_format"] = self._json_response_format()

@@ -521,6 +521,10 @@ class TermExtractionService:
     def _stage_enable_thinking(self, stage_key: str) -> bool:
         return bool(self._stage_settings(stage_key).get("enable_thinking", False))
 
+    def _stage_reasoning_effort(self, stage_key: str) -> str:
+        effort = str(self._stage_settings(stage_key).get("reasoning_effort") or "low").strip().lower()
+        return effort if effort in {"low", "medium", "high"} else "low"
+
     async def test_connection(self) -> str:
         provider_name = self.settings.provider_name
         provider_settings = self.settings.provider_settings[provider_name]
@@ -759,6 +763,7 @@ class TermExtractionService:
         internal_token_limit = self._request_limit_int("internal_nontrans_prompt_token_limit", 56000)
         regex_batch_item_limit = self._request_limit_int("internal_nontrans_regex_batch_item_limit", 50)
         enable_thinking = bool(nontrans_settings.get("enable_thinking", False))
+        reasoning_effort = self._stage_reasoning_effort("nontrans_stage_settings")
         builtin_regex_enabled = bool(nontrans_settings.get("builtin_regex_enabled", True))
         ai_discovery_enabled = bool(nontrans_settings.get("ai_discovery_enabled", True))
         ai_regex_generation_enabled = bool(nontrans_settings.get("ai_regex_generation_enabled", True))
@@ -792,6 +797,7 @@ class TermExtractionService:
                             "stage": "NONTRANS_DISCOVERY",
                             "batch_index": batch_index,
                             "enable_thinking": enable_thinking,
+                            "reasoning_effort": reasoning_effort,
                             "items": list(batch.get("items", []) or []),
                         },
                     )
@@ -889,6 +895,7 @@ class TermExtractionService:
                             "batch_index": batch_index,
                             "generation_round": generation_round,
                             "enable_thinking": enable_thinking,
+                            "reasoning_effort": reasoning_effort,
                             "items": list(batch.get("items", []) or []),
                         },
                     )
@@ -1320,6 +1327,7 @@ class TermExtractionService:
             task_input.batch_request_char_limit,
         )
         recall_enable_thinking = self._stage_enable_thinking("term_recall_stage_settings")
+        recall_reasoning_effort = self._stage_reasoning_effort("term_recall_stage_settings")
         total_items = len(segments)
         filtered_segment_ids = set()
         for segment in segments:
@@ -1383,6 +1391,7 @@ class TermExtractionService:
                             "cycle": cycle,
                             "batch_index": batch_index,
                             "enable_thinking": recall_enable_thinking,
+                            "reasoning_effort": recall_reasoning_effort,
                             "items": {
                                 item["request_id"]: item["item"].to_dict()
                                 for item in batch["items"]
@@ -1583,6 +1592,7 @@ class TermExtractionService:
             task_input.batch_request_char_limit,
         )
         recall_enable_thinking = self._stage_enable_thinking("term_recall_stage_settings")
+        recall_reasoning_effort = self._stage_reasoning_effort("term_recall_stage_settings")
 
         batches = build_chunk_term_recall_batches(
             recallable_records,
@@ -1616,7 +1626,8 @@ class TermExtractionService:
                         "stage": "RECALLING_CANDIDATES",
                         "recall_mode": "chunk",
                         "batch_index": batch_index,
-                        "enable_thinking": recall_enable_thinking,
+                            "enable_thinking": recall_enable_thinking,
+                            "reasoning_effort": recall_reasoning_effort,
                         "items": {
                             item["request_id"]: item["item"].to_dict()
                             for item in batch["items"]
@@ -1712,6 +1723,7 @@ class TermExtractionService:
             220,
         )
         review_enable_thinking = self._stage_enable_thinking("term_review_stage_settings")
+        review_reasoning_effort = self._stage_reasoning_effort("term_review_stage_settings")
 
         reviewable_candidates = []
         for candidate in candidates:
@@ -1811,6 +1823,7 @@ class TermExtractionService:
                             "batch_index": batch_index,
                             "allowed_term_types": allowed_term_types,
                             "enable_thinking": review_enable_thinking,
+                            "reasoning_effort": review_reasoning_effort,
                             "items": items,
                         },
                     )

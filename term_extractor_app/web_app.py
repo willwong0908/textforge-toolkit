@@ -261,6 +261,9 @@ class SettingsPayload(BaseModel):
     ai_review_workspace_enable_thinking: Optional[bool] = None
     ai_review_debug_payload_logging: Optional[bool] = None
     ai_review_reasoning_effort: Optional[str] = None
+    nontrans_reasoning_effort: Optional[str] = None
+    term_recall_reasoning_effort: Optional[str] = None
+    term_review_reasoning_effort: Optional[str] = None
     nontrans_enable_thinking: Optional[bool] = None
     term_recall_enable_thinking: Optional[bool] = None
     term_review_enable_thinking: Optional[bool] = None
@@ -1161,6 +1164,9 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         nontrans = dict(settings.input_defaults.get("nontrans_stage_settings", {}) or {})
         if payload.nontrans_chunk_char_limit is not None:
             nontrans["chunk_char_limit"] = int(payload.nontrans_chunk_char_limit)
+        if payload.nontrans_reasoning_effort is not None:
+            effort = str(payload.nontrans_reasoning_effort or "low").strip().lower()
+            nontrans["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
         if payload.nontrans_enable_thinking is not None:
             nontrans["enable_thinking"] = bool(payload.nontrans_enable_thinking)
         if payload.builtin_regex_enabled is not None:
@@ -1174,6 +1180,9 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         recall = dict(settings.input_defaults.get("term_recall_stage_settings", {}) or {})
         if payload.term_recall_batch_char_limit is not None:
             recall["batch_request_char_limit"] = int(payload.term_recall_batch_char_limit)
+        if payload.term_recall_reasoning_effort is not None:
+            effort = str(payload.term_recall_reasoning_effort or "low").strip().lower()
+            recall["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
         if payload.term_recall_enable_thinking is not None:
             recall["enable_thinking"] = bool(payload.term_recall_enable_thinking)
         settings.input_defaults["term_recall_stage_settings"] = recall
@@ -1183,6 +1192,9 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             review["batch_request_char_limit"] = int(payload.term_review_batch_char_limit)
         if payload.term_review_max_context_chars is not None:
             review["max_context_chars"] = int(payload.term_review_max_context_chars)
+        if payload.term_review_reasoning_effort is not None:
+            effort = str(payload.term_review_reasoning_effort or "low").strip().lower()
+            review["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
         if payload.term_review_enable_thinking is not None:
             review["enable_thinking"] = bool(payload.term_review_enable_thinking)
         settings.input_defaults["term_review_stage_settings"] = review
@@ -1200,7 +1212,14 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             ai_review["debug_payload_logging"] = bool(payload.ai_review_debug_payload_logging)
         if payload.ai_review_reasoning_effort is not None:
             effort = str(payload.ai_review_reasoning_effort or "low").strip().lower()
-            ai_review["reasoning_effort"] = effort if effort in {"low", "high", "max"} else "low"
+            ai_review["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
+        # These three stages always use model reasoning; the UI only exposes its intensity.
+        nontrans["enable_thinking"] = True
+        recall["enable_thinking"] = True
+        review["enable_thinking"] = True
+        settings.input_defaults["nontrans_stage_settings"] = nontrans
+        settings.input_defaults["term_recall_stage_settings"] = recall
+        settings.input_defaults["term_review_stage_settings"] = review
         ai_review["enable_thinking"] = True
         ai_review["workspace_enable_thinking"] = True
         ai_review.pop("workspace_model", None)
@@ -2385,25 +2404,25 @@ INDEX_HTML = """<!doctype html>
               <h3>非译元素阶段</h3>
               <p></p>
             </div>
-            <label>单次处理长度<input id="nontransLimit" type="number" min="200" value="3000" /></label>
-            <label class="check"><input id="nontransThinking" type="checkbox" /> 深度思考</label>
+            <label>单次处理长度<input id="nontransLimit" type="number" min="200" value="20000" /></label>
+            <label>思考强度（已开启）<select id="nontransReasoningEffort"><option value="low">低 · 更快</option><option value="medium">中 · 平衡</option><option value="high">高 · 更充分</option></select></label>
           </section>
           <section class="card compact-card">
             <div class="card-title">
               <h3>术语召回阶段</h3>
               <p></p>
             </div>
-            <label>单次处理长度<input id="recallLimit" type="number" min="200" value="3000" /></label>
-            <label class="check"><input id="recallThinking" type="checkbox" /> 深度思考</label>
+            <label>单次处理长度<input id="recallLimit" type="number" min="200" value="20000" /></label>
+            <label>思考强度（已开启）<select id="recallReasoningEffort"><option value="low">低 · 更快</option><option value="medium">中 · 平衡</option><option value="high">高 · 更充分</option></select></label>
           </section>
           <section class="card compact-card">
             <div class="card-title">
               <h3>术语校验阶段</h3>
               <p></p>
             </div>
-            <label>单次处理长度<input id="reviewLimit" type="number" min="200" value="3000" /></label>
+            <label>单次处理长度<input id="reviewLimit" type="number" min="200" value="20000" /></label>
             <label>上下文长度<input id="reviewContextLimit" type="number" min="50" max="2000" value="220" /></label>
-            <label class="check"><input id="reviewThinking" type="checkbox" /> 深度思考</label>
+            <label>思考强度（已开启）<select id="termReviewReasoningEffort"><option value="low">低 · 更快</option><option value="medium">中 · 平衡</option><option value="high">高 · 更充分</option></select></label>
           </section>
         </div>
 
@@ -2992,7 +3011,7 @@ INDEX_HTML = """<!doctype html>
               <p>Workspace Agent 与 Task Workflow 统一使用“模型设置”中的当前模型和 API 配置。</p>
             </div>
             <div class="grid two">
-              <label>思考强度<select id="reviewReasoningEffort"><option value="low">低</option><option value="high">中</option><option value="max">高</option></select></label>
+              <label>思考强度<select id="reviewReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
               <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
               <label>单包字符预算<input id="reviewAiLimit" type="number" min="1000" value="20000" /></label>
               <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="80" /></label>
@@ -6248,14 +6267,14 @@ function settingsPayload() {
     disable_system_proxy: $("disableSystemProxy").checked,
     extraction_mode: $("extractionMode").value,
     source_language: $("sourceLanguage").value,
-    nontrans_chunk_char_limit: Number($("nontransLimit").value || 3000),
+    nontrans_chunk_char_limit: Number($("nontransLimit").value || 20000),
     nontrans_placeholder_format: $("nontransPlaceholderFormat").value || "<{n}>",
-    term_recall_batch_char_limit: Number($("recallLimit").value || 3000),
-    term_review_batch_char_limit: Number($("reviewLimit").value || 3000),
+    term_recall_batch_char_limit: Number($("recallLimit").value || 20000),
+    term_review_batch_char_limit: Number($("reviewLimit").value || 20000),
     term_review_max_context_chars: Number($("reviewContextLimit").value || 220),
-    nontrans_enable_thinking: $("nontransThinking").checked,
-    term_recall_enable_thinking: $("recallThinking").checked,
-    term_review_enable_thinking: $("reviewThinking").checked,
+    nontrans_reasoning_effort: $("nontransReasoningEffort").value || "low",
+    term_recall_reasoning_effort: $("recallReasoningEffort").value || "low",
+    term_review_reasoning_effort: $("termReviewReasoningEffort").value || "low",
     builtin_regex_enabled: $("builtinRegex").checked,
     ai_discovery_enabled: $("aiDiscovery").checked,
     ai_regex_generation_enabled: $("aiRegex").checked,
@@ -8782,19 +8801,20 @@ async function loadSettings() {
   const recall = data.term_recall_stage_settings || {};
   const review = data.term_review_stage_settings || {};
   const aiReview = data.ai_review_stage_settings || {};
-  $("nontransLimit").value = nontrans.chunk_char_limit || 3000;
-  $("recallLimit").value = recall.batch_request_char_limit || 3000;
-  $("reviewLimit").value = review.batch_request_char_limit || 3000;
+  $("nontransLimit").value = Number(nontrans.chunk_char_limit || 0) <= 6000 ? 20000 : nontrans.chunk_char_limit;
+  $("recallLimit").value = Number(recall.batch_request_char_limit || 0) <= 6000 ? 20000 : recall.batch_request_char_limit;
+  $("reviewLimit").value = Number(review.batch_request_char_limit || 0) <= 6000 ? 20000 : review.batch_request_char_limit;
   $("reviewContextLimit").value = review.max_context_chars || 220;
-  $("nontransThinking").checked = Boolean(nontrans.enable_thinking);
-  $("recallThinking").checked = Boolean(recall.enable_thinking);
-  $("reviewThinking").checked = Boolean(review.enable_thinking);
+  const normalizeReasoningEffort = (value) => ["low", "medium", "high"].includes(value) ? value : "low";
+  $("nontransReasoningEffort").value = normalizeReasoningEffort(nontrans.reasoning_effort);
+  $("recallReasoningEffort").value = normalizeReasoningEffort(recall.reasoning_effort);
+  $("termReviewReasoningEffort").value = normalizeReasoningEffort(review.reasoning_effort);
   if ($("reviewAiLimit")) {
     const configuredLimit = Number(aiReview.batch_request_char_limit || 0);
     $("reviewAiLimit").value = configuredLimit <= 6000 ? 20000 : configuredLimit;
   }
   $("reviewMaxItems").value = aiReview.max_items_per_request || 80;
-  $("reviewReasoningEffort").value = ["low", "high", "max"].includes(aiReview.reasoning_effort) ? aiReview.reasoning_effort : "low";
+  $("reviewReasoningEffort").value = normalizeReasoningEffort(aiReview.reasoning_effort === "max" ? "high" : aiReview.reasoning_effort);
   $("reviewDebugPayloadLogging").checked = Boolean(aiReview.debug_payload_logging);
   $("builtinRegex").checked = nontrans.builtin_regex_enabled !== false;
   $("aiDiscovery").checked = nontrans.ai_discovery_enabled !== false;
