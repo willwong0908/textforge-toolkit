@@ -2979,6 +2979,10 @@ INDEX_HTML = """<!doctype html>
             <span id="reviewRequestedCount" class="hidden">0</span>
             <span id="reviewProgressPercent" class="hidden">未开始</span>
           </div>
+          <section id="reviewRequestQueue" class="review-request-queue hidden" aria-label="AI 请求状态">
+            <div class="review-request-queue-head"><strong>AI 请求状态</strong><span id="reviewRequestQueueSummary">等待创建请求</span></div>
+            <div id="reviewRequestColumns" class="review-request-columns"></div>
+          </section>
           <div id="outputPanel" class="result-file hidden"><span>结果文件</span><strong id="outputPath">暂无输出</strong></div>
           <div class="actions">
             <button id="openOutputDirButton" class="secondary" type="button">打开输出目录</button>
@@ -5782,7 +5786,80 @@ input:disabled, select:disabled {
   background: linear-gradient(145deg, rgba(73, 111, 151, .5), rgba(27, 51, 76, .78));
   color: #eff8ff;
 }
+.review-request-queue {
+  margin: 0 0 14px;
+  border: 1px solid rgba(108, 145, 202, .36);
+  border-radius: 8px;
+  background: rgba(11, 23, 42, .52);
+  overflow: hidden;
+}
+.review-request-queue-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(104, 133, 181, .24);
+  background: rgba(37, 56, 90, .28);
+}
+.review-request-queue-head strong { color: #edf4ff; font-size: 13px; }
+.review-request-queue-head span { color: #9fb3cf; font-size: 12px; white-space: nowrap; }
+.review-request-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+}
+.review-request-lane {
+  min-width: 0;
+  border: 1px solid rgba(104, 133, 181, .27);
+  border-radius: 6px;
+  background: rgba(10, 20, 36, .36);
+  overflow: hidden;
+}
+.review-request-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 9px;
+  border-bottom: 1px solid rgba(104, 133, 181, .22);
+  font-size: 12px;
+}
+.review-request-lane-head strong { color: #dbe8f9; font-weight: 700; }
+.review-request-lane-head span {
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid rgba(126, 157, 208, .32);
+  border-radius: 999px;
+  color: #aebfd7;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.review-request-lane.status-queued .review-request-lane-head { box-shadow: inset 3px 0 0 #7088ad; }
+.review-request-lane.status-submitted .review-request-lane-head { box-shadow: inset 3px 0 0 #78a8ff; }
+.review-request-lane.status-thinking .review-request-lane-head { box-shadow: inset 3px 0 0 #b28cff; }
+.review-request-lane.status-output .review-request-lane-head { box-shadow: inset 3px 0 0 #5ed4c1; }
+.review-request-lane.status-completed .review-request-lane-head { box-shadow: inset 3px 0 0 #72c992; }
+.review-request-lane.status-failed .review-request-lane-head { box-shadow: inset 3px 0 0 #ee8793; }
+.review-request-items { display: grid; gap: 6px; padding: 8px; }
+.review-request-item {
+  display: grid;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid rgba(104, 133, 181, .21);
+  border-radius: 5px;
+  background: rgba(40, 57, 88, .22);
+}
+.review-request-item strong { color: #dce8f8; font-size: 12px; font-weight: 650; }
+.review-request-item span { overflow: hidden; color: #9fb0c7; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.review-request-item em { color: #f0c46e; font-size: 11px; font-style: normal; }
+.review-request-empty { padding: 10px; color: #7f92ad; font-size: 12px; }
 @media (max-width: 700px) {
+  .review-request-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .review-request-queue-head { align-items: flex-start; flex-direction: column; gap: 3px; }
   .tool-guide-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
   .tool-guide-dialog .dialog-card { max-height: calc(100dvh - 20px); }
   .tool-guide-dialog .dialog-header { padding: 16px; }
@@ -6956,6 +7033,71 @@ function renderAiReviewProgress(task = {}) {
   $("reviewProgressBar").style.width = total > 0 ? `${percent}%` : "0";
 }
 
+const REVIEW_REQUEST_STATUS_LANES = [
+  ["queued", "排队中"],
+  ["submitted", "已提交"],
+  ["thinking", "思考中"],
+  ["output", "输出中"],
+  ["completed", "已完成"],
+  ["failed", "失败"],
+];
+
+function renderReviewRequestQueue(task = {}) {
+  const root = $("reviewRequestQueue");
+  const columns = $("reviewRequestColumns");
+  const summary = $("reviewRequestQueueSummary");
+  if (!root || !columns || !summary) return;
+  const states = Array.isArray(task?.request_states) ? task.request_states : [];
+  root.classList.toggle("hidden", !task?.id || !states.length);
+  columns.innerHTML = "";
+  if (!states.length) {
+    summary.textContent = task?.id ? "正在创建请求包…" : "等待创建请求";
+    return;
+  }
+  const totalItems = states.reduce((sum, item) => sum + Math.max(0, Number(item.item_count || 0)), 0);
+  summary.textContent = `共 ${states.length} 个请求 · ${totalItems} 条`;
+  REVIEW_REQUEST_STATUS_LANES.forEach(([status, label]) => {
+    const items = states.filter((item) => String(item.status || "queued") === status);
+    if (!items.length && status === "failed") return;
+    const lane = document.createElement("section");
+    lane.className = `review-request-lane status-${status}`;
+    const head = document.createElement("div");
+    head.className = "review-request-lane-head";
+    const heading = document.createElement("strong");
+    heading.textContent = label;
+    const count = document.createElement("span");
+    count.textContent = String(items.length);
+    head.append(heading, count);
+    const body = document.createElement("div");
+    body.className = "review-request-items";
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "review-request-empty";
+      empty.textContent = "—";
+      body.appendChild(empty);
+    } else {
+      items.forEach((item) => {
+        const entry = document.createElement("div");
+        entry.className = "review-request-item";
+        const title = document.createElement("strong");
+        title.textContent = `请求 ${item.package_index}/${item.package_total} · ${item.item_count} 条`;
+        const location = document.createElement("span");
+        location.title = String(item.location || "待审校单元");
+        location.textContent = location.title;
+        entry.append(title, location);
+        if (Number(item.attempt_count || 0) > 1) {
+          const retry = document.createElement("em");
+          retry.textContent = `第 ${item.attempt_count} 次请求`;
+          entry.appendChild(retry);
+        }
+        body.appendChild(entry);
+      });
+    }
+    lane.append(head, body);
+    columns.appendChild(lane);
+  });
+}
+
 function summarizeAiReviewExcelMapping(mapping) {
   const sheets = Array.isArray(mapping?.sheets) ? mapping.sheets : [];
   const count = sheets.reduce((total, sheet) => total + Number((sheet.mappings || []).length || 0), 0);
@@ -7584,6 +7726,7 @@ function renderAiReviewResults(task, results) {
   renderAiReviewResultHead(task || {});
   const outputFile = String(task?.output_path || task?.output_file || "");
   renderAiReviewProgress(task || {});
+  renderReviewRequestQueue(task || {});
   $("outputPath").textContent = outputFile || "暂无输出";
   $("outputPanel").classList.toggle("hidden", !outputFile);
   $("openOutputFileButton").disabled = !outputFile;
@@ -8282,7 +8425,7 @@ function connectReviewConversationEvents(sessionId) {
   const eventNames = [
     "message.created", "attachment.uploaded", "attachment.deleted", "attachment.inspected", "workspace.started", "workspace.ready",
     "workspace.needs_input", "workspace.failed", "workspace.question", "review.started", "review.progress",
-    "review.package_completed", "review.completed",
+    "review.request_status", "review.package_completed", "review.completed",
   ];
   eventNames.forEach((name) => source.addEventListener(name, (event) => {
     reviewConversationState.eventCursor = Math.max(reviewConversationState.eventCursor, Number(event.lastEventId || 0));

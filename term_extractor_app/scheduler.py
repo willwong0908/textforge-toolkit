@@ -68,7 +68,12 @@ class AsyncRequestScheduler:
         self.failure_count = 0
         self.retry_count = 0
 
-    async def run(self, requests: List[LLMRequest], on_result: Optional[ResultCallback] = None) -> Dict[str, LLMResponse]:
+    async def run(
+        self,
+        requests: List[LLMRequest],
+        on_result: Optional[ResultCallback] = None,
+        on_request_started: Optional[Callable[[LLMRequest], Optional[Awaitable[None]]]] = None,
+    ) -> Dict[str, LLMResponse]:
         results: Dict[str, LLMResponse] = {}
         if not requests:
             return results
@@ -95,6 +100,10 @@ class AsyncRequestScheduler:
                     continue
 
                 try:
+                    if on_request_started is not None:
+                        started_result = on_request_started(request)
+                        if inspect.isawaitable(started_result):
+                            await started_result
                     try:
                         response = await self._execute_request(request)
                     except SchedulerCancelledError:

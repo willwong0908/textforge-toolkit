@@ -147,6 +147,7 @@ def delete_session(session_id: str) -> None:
             conn.execute("DELETE FROM forbidden_results WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM review_results WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM review_task_logs WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM review_request_states WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM review_tasks WHERE id = ?", (task_id,))
         for table in (
             "review_session_events", "review_session_tasks", "workspace_questions", "workspace_runs",

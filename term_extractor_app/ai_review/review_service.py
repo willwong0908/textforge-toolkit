@@ -167,6 +167,7 @@ def create_review_task(
             "max_concurrency": int(settings.get("max_concurrency") or 8),
             "max_items_per_request": int(settings.get("max_items_per_request") or 80),
             "enable_thinking": bool(settings.get("enable_thinking", False)),
+            "reasoning_effort": str(settings.get("reasoning_effort") or "low"),
             "debug_payload_logging": bool(settings.get("debug_payload_logging", False)),
             "session_id": str(session_id or ""),
         }
@@ -190,7 +191,16 @@ def create_review_task(
 def get_review_task(task_id: str) -> dict[str, Any] | None:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM review_tasks WHERE id = ?", (task_id,)).fetchone()
-    return _task_to_dict(row) if row else None
+    if not row:
+        return None
+    task = _task_to_dict(row)
+    request_states = _get_review_request_states(task_id)
+    task["request_states"] = request_states
+    task["request_status_counts"] = {
+        status: sum(1 for item in request_states if item["status"] == status)
+        for status in ("queued", "submitted", "thinking", "output", "completed", "failed")
+    }
+    return task
 
 
 def get_review_logs(task_id: str, after_id: int = 0) -> list[dict[str, Any]]:
@@ -478,6 +488,7 @@ def _run_review_task(task_id: str) -> None:
             max_chars,
             max_items=max(1, int(config.get("max_items_per_request") or 80)),
         )
+        _replace_review_request_states(task_id, packages)
         requested_count, completed_count, failed_count = asyncio.run(
             _run_review_packages(
                 task_id=task_id,
@@ -562,6 +573,16 @@ async def _run_review_packages(
             json.dumps(payload, ensure_ascii=False),
             any(_item_info(item) for item in package),
         )
+        metadata = {
+            "enable_thinking": bool(config.get("enable_thinking", False)),
+            "reasoning_effort": str(config.get("reasoning_effort") or "low"),
+            "package_index": index,
+            "package": package,
+        }
+        if "deepseek" in f"{provider_name} {provider_settings.base_url}".lower():
+            metadata["stream_phase_callback"] = lambda phase, package_index=index: _set_review_request_status(
+                task_id, package_index, phase
+            )
         requests.append(
             LLMRequest(
                 task_id=f"ai_review_package_{index}",
@@ -571,11 +592,7 @@ async def _run_review_packages(
                     {"role": "system", "content": config["system_prompt"]},
                     {"role": "user", "content": user_prompt},
                 ],
-                metadata={
-                    "enable_thinking": bool(config.get("enable_thinking", False)),
-                    "package_index": index,
-                    "package": package,
-                },
+                metadata=metadata,
             )
         )
 
@@ -609,9 +626,10 @@ async def _run_review_packages(
         return response
 
     def on_result(request: LLMRequest, response: LLMResponse, snapshot) -> None:
-        nonlocal requested_count, completed_count, failed_count
+        nonlocal completed_count, failed_count
         package = list(request.metadata.get("package") or [])
         package_index = int(request.metadata.get("package_index") or 0)
+        _set_review_request_status(task_id, package_index, "completed" if response.success else "failed", response.attempts)
         _add_log(task_id, "info", f"第 {package_index}/{len(packages)} 包完成，包含 {len(package)} 条，并发 {snapshot.current_concurrency}")
         if bool(config.get("debug_payload_logging", False)):
             _add_log(
@@ -657,7 +675,6 @@ async def _run_review_packages(
             _save_review_errors_bulk(task_id, package, message)
 
         with counters_lock:
-            requested_count += len(package)
             completed_count += len(package)
             if not response.success:
                 failed_count += len(package)
@@ -683,6 +700,15 @@ async def _run_review_packages(
                 },
             )
 
+    def on_request_started(request: LLMRequest) -> None:
+        nonlocal requested_count
+        package = list(request.metadata.get("package") or [])
+        package_index = int(request.metadata.get("package_index") or 0)
+        with counters_lock:
+            requested_count += len(package)
+            _update_task(task_id, requested_count=requested_count)
+        _set_review_request_status(task_id, package_index, "submitted", 1)
+
     original_send_prompt = adapter.send_prompt
 
     async def logged_send_prompt(request: LLMRequest, attempt: int = 1) -> LLMResponse:
@@ -690,6 +716,7 @@ async def _run_review_packages(
         if attempt == 1:
             _add_log(task_id, "info", f"已发送第 {package_index}/{len(packages)} 包，正在等待模型响应。")
         else:
+            _set_review_request_status(task_id, package_index, "submitted", attempt)
             _add_log(task_id, "warning", f"第 {package_index}/{len(packages)} 包响应无效或请求失败，正在进行第 {attempt} 次请求。")
         return await original_send_prompt(request, attempt=attempt)
 
@@ -717,7 +744,7 @@ async def _run_review_packages(
             "info",
             f"开始 AI 审校，共 {len(packages)} 包；自动并发从 {controller.current_concurrency} 路启动，最高 {controller.effective_max} 路。",
         )
-        await scheduler.run(requests, on_result=on_result)
+        await scheduler.run(requests, on_result=on_result, on_request_started=on_request_started)
     finally:
         await adapter.close()
     return requested_count, completed_count, failed_count
@@ -1152,6 +1179,78 @@ def _update_task(task_id: str, **fields: Any) -> None:
     values.append(task_id)
     with get_connection() as conn:
         conn.execute(f"UPDATE review_tasks SET {assignments} WHERE id = ?", values)
+
+
+def _replace_review_request_states(task_id: str, packages: list[list[dict[str, Any]]]) -> None:
+    now = utc_now()
+    with get_connection() as conn:
+        conn.execute("DELETE FROM review_request_states WHERE task_id = ?", (task_id,))
+        for index, package in enumerate(packages, start=1):
+            first = dict(package[0] if package else {})
+            conn.execute(
+                """
+                INSERT INTO review_request_states (
+                    id, task_id, package_index, package_total, item_count, first_item_id,
+                    first_source_file, first_sheet_name, first_row_number, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex, task_id, index, len(packages), len(package), str(first.get("id") or ""),
+                    str(first.get("source_file") or ""), str(first.get("sheet_name") or ""), first.get("row_number"), now, now,
+                ),
+            )
+
+
+def _set_review_request_status(task_id: str, package_index: int, status: str, attempt_count: int | None = None) -> None:
+    if status not in {"queued", "submitted", "thinking", "output", "completed", "failed"}:
+        return
+    assignments = ["status = ?", "updated_at = ?"]
+    values: list[Any] = [status, utc_now()]
+    if attempt_count is not None:
+        assignments.append("attempt_count = ?")
+        values.append(max(0, int(attempt_count)))
+    values.extend([task_id, package_index])
+    with get_connection() as conn:
+        conn.execute(
+            f"UPDATE review_request_states SET {', '.join(assignments)} WHERE task_id = ? AND package_index = ?",
+            values,
+        )
+        row = conn.execute(
+            "SELECT * FROM review_request_states WHERE task_id = ? AND package_index = ?", (task_id, package_index)
+        ).fetchone()
+        task = conn.execute("SELECT session_id, target_language FROM review_tasks WHERE id = ?", (task_id,)).fetchone()
+    if row and task and task["session_id"]:
+        emit_event(
+            str(task["session_id"]),
+            "review.request_status",
+            {"task_id": task_id, "target_language": str(task["target_language"] or ""), "request": _request_state_to_dict(row)},
+        )
+
+
+def _get_review_request_states(task_id: str) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM review_request_states WHERE task_id = ? ORDER BY package_index", (task_id,)
+        ).fetchall()
+    return [_request_state_to_dict(row) for row in rows]
+
+
+def _request_state_to_dict(row: Any) -> dict[str, Any]:
+    status = str(row["status"] or "queued")
+    label_map = {
+        "queued": "排队中", "submitted": "已提交 · 等待首段", "thinking": "思考中",
+        "output": "输出中", "completed": "已完成", "failed": "失败",
+    }
+    location = " / ".join(
+        item for item in (str(row["first_source_file"] or ""), str(row["first_sheet_name"] or "")) if item
+    )
+    if row["first_row_number"]:
+        location = f"{location}{' · ' if location else ''}第 {row['first_row_number']} 行"
+    return {
+        "id": row["id"], "package_index": int(row["package_index"]), "package_total": int(row["package_total"]),
+        "item_count": int(row["item_count"]), "status": status, "status_label": label_map.get(status, status),
+        "attempt_count": int(row["attempt_count"] or 0), "location": location, "updated_at": row["updated_at"],
+    }
 
 
 def _add_log(task_id: str, level: str, message: str) -> None:

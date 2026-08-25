@@ -35,7 +35,9 @@ def get_shared_ai_settings() -> dict[str, Any]:
     if configured_limit <= 6000:
         configured_limit = 20000
     reasoning_effort = str(ai_review_stage.get("reasoning_effort") or "low").strip().lower()
-    if reasoning_effort not in {"low", "high", "max"}:
+    if reasoning_effort == "max":
+        reasoning_effort = "high"
+    if reasoning_effort not in {"low", "medium", "high"}:
         reasoning_effort = "low"
     return {
         "provider": provider_name,
@@ -204,7 +206,7 @@ def _thinking_metadata(provider_name: str, provider: ProviderSettings, effort: s
     if "deepseek" in identity:
         return {
             "thinking": {"type": "enabled"},
-            "reasoning_effort": effort if effort in {"low", "high", "max"} else "low",
+            "reasoning_effort": "high" if effort == "max" else effort if effort in {"low", "medium", "high"} else "low",
         }
     return {"enable_thinking": True}
 

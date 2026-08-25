@@ -168,6 +168,26 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS review_request_states (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                package_index INTEGER NOT NULL,
+                package_total INTEGER NOT NULL,
+                item_count INTEGER NOT NULL,
+                first_item_id TEXT NOT NULL DEFAULT '',
+                first_source_file TEXT NOT NULL DEFAULT '',
+                first_sheet_name TEXT NOT NULL DEFAULT '',
+                first_row_number INTEGER,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(task_id, package_index)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS review_results (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -406,6 +426,12 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_review_followup_messages_result
             ON review_followup_messages(task_id, result_id, created_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_request_states_task
+            ON review_request_states(task_id, package_index)
             """
         )
         conn.execute(

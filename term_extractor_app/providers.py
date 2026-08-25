@@ -153,6 +153,9 @@ class OpenAICompatibleAdapter:
         return ""
 
     async def send_prompt(self, request: LLMRequest, attempt: int = 1) -> LLMResponse:
+        phase_callback = dict(getattr(request, "metadata", {}) or {}).get("stream_phase_callback")
+        if callable(phase_callback):
+            return await self._send_prompt_streaming(request, attempt, phase_callback)
         start = time.perf_counter()
         wants_json_mode = self._supports_json_response_format(request)
         json_mode = self._initial_json_mode(request)
@@ -311,6 +314,106 @@ class OpenAICompatibleAdapter:
                 retryable=True,
                 response_metadata={"json_mode": json_mode},
             )
+
+    async def _send_prompt_streaming(self, request: LLMRequest, attempt: int, phase_callback) -> LLMResponse:
+        """Stream DeepSeek-compatible deltas so the review UI can expose the real model phase."""
+        start = time.perf_counter()
+        messages = list(getattr(request, "messages", []) or []) or [{"role": "user", "content": request.prompt}]
+        metadata = dict(getattr(request, "metadata", {}) or {})
+        provider_identity = f"{self.provider_name} {self.settings.base_url}".lower()
+        is_deepseek = "deepseek" in provider_identity
+        payload: Dict[str, object] = {
+            "model": self.settings.model,
+            "messages": messages,
+            "temperature": 0.0 if self._is_json_batch_task(request) else 0.2,
+            "stream": True,
+        }
+        if "enable_thinking" in metadata:
+            enabled = bool(metadata.get("enable_thinking"))
+            payload["thinking" if is_deepseek else "enable_thinking"] = (
+                {"type": "enabled" if enabled else "disabled"} if is_deepseek else enabled
+            )
+        if "thinking" in metadata:
+            payload["thinking"] = metadata.get("thinking")
+        if is_deepseek and "reasoning_effort" in metadata:
+            payload["reasoning_effort"] = str(metadata.get("reasoning_effort") or "low")
+        if self._supports_json_response_format(request):
+            payload["response_format"] = self._json_response_format()
+
+        content_chunks: List[str] = []
+        current_phase = ""
+
+        def report_phase(phase: str) -> None:
+            nonlocal current_phase
+            if phase == current_phase:
+                return
+            current_phase = phase
+            phase_callback(phase)
+
+        try:
+            async with self.client.stream("POST", self._chat_url(), headers=self._headers(), json=payload) as response:
+                if response.status_code >= 400:
+                    raw = await response.aread()
+                    message = raw.decode("utf-8", errors="replace")
+                    normalized, retryable = self._normalize_error(response.status_code, message)
+                    return LLMResponse(
+                        task_id=request.task_id, task_type=request.task_type, content="", provider=self.provider_name,
+                        model=self.settings.model, latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt,
+                        success=False, error=normalized, error_type=f"http_{response.status_code}", retryable=retryable,
+                        response_metadata={"json_mode": "stream"},
+                    )
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    delta = choices[0].get("delta") if choices and isinstance(choices[0], dict) else {}
+                    if not isinstance(delta, dict):
+                        continue
+                    if delta.get("reasoning_content") or delta.get("reasoning"):
+                        report_phase("thinking")
+                    content = delta.get("content") or ""
+                    if isinstance(content, list):
+                        content = "".join(
+                            str(item.get("text") or "") for item in content
+                            if isinstance(item, dict) and item.get("type") == "text"
+                        )
+                    if content:
+                        report_phase("output")
+                        content_chunks.append(str(content))
+        except httpx.TimeoutException as exc:
+            return LLMResponse(
+                task_id=request.task_id, task_type=request.task_type, content="", provider=self.provider_name,
+                model=self.settings.model, latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt,
+                success=False, error=str(exc) or "请求超时", error_type="timeout", retryable=True,
+                response_metadata={"json_mode": "stream"},
+            )
+        except httpx.HTTPError as exc:
+            return LLMResponse(
+                task_id=request.task_id, task_type=request.task_type, content="", provider=self.provider_name,
+                model=self.settings.model, latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt,
+                success=False, error=self._describe_http_error(exc), error_type="network", retryable=True,
+                response_metadata={"json_mode": "stream"},
+            )
+        content = "".join(content_chunks)
+        if not content.strip():
+            return LLMResponse(
+                task_id=request.task_id, task_type=request.task_type, content="", provider=self.provider_name,
+                model=self.settings.model, latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt,
+                success=False, error="模型返回空内容", error_type="empty_response", retryable=True,
+                response_metadata={"json_mode": "stream"},
+            )
+        return LLMResponse(
+            task_id=request.task_id, task_type=request.task_type, content=content, provider=self.provider_name,
+            model=self.settings.model, latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt,
+            success=True, response_metadata={"json_mode": "stream"},
+        )
 
     async def _post_with_json_mode_fallback(
         self,
