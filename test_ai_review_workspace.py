@@ -162,7 +162,7 @@ class WorkspaceSessionTests(unittest.TestCase):
         self.assertEqual(snapshot["workspace_runs"][0]["model"], "configured-model")
         report = next(message["content"] for message in snapshot["messages"] if message["kind"] == "workspace_report")
         self.assertIn("translations.csv", report)
-        self.assertIn("样例 1", report)
+        self.assertIn("Source", report)
         self.assertIn("第 1 列", report)
 
     def test_natural_language_adjustment_rebuilds_full_column_mapping(self) -> None:

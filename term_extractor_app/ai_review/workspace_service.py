@@ -1259,15 +1259,6 @@ def _format_report(plan: dict[str, Any]) -> str:
                 f"｜译文：{mapping.get('target_location') or '未识别'}"
                 f"｜参考：{mapping.get('reference_locations') or '无'}"
             )
-            for sample_index, sample in enumerate(mapping.get("samples") or [], 1):
-                source = str(sample.get("source") or "")
-                target = str(sample.get("target") or "")
-                position = str(sample.get("position") or "")
-                if source:
-                    lines.append(f"    样例 {sample_index} [{position}] 原文：{source}")
-                    lines.append(f"                         译文：{target}")
-                else:
-                    lines.append(f"    样例 {sample_index} [{position}] 译文：{target}")
     direct_summary = _build_direct_summary(plan)
     if direct_summary:
         lines.extend(["", *direct_summary])

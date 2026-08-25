@@ -4943,6 +4943,36 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-chat-message.user { align-self: flex-end; padding: 11px 15px; border-radius: 16px 16px 4px 16px; background: rgba(48, 111, 214, 0.12); }
 .review-chat-message.assistant { align-self: flex-start; }
 .review-chat-message.workspace-report { width: min(900px, 96%); padding: 16px 18px; border: 1px solid rgba(31, 111, 104, 0.18); border-radius: 16px; background: linear-gradient(180deg, #fbfefd 0%, #f5faf9 100%); box-shadow: 0 6px 20px rgba(23, 55, 70, 0.04); font-size: 13px; }
+.review-workspace-preview { display: grid; gap: 12px; white-space: normal; }
+.review-workspace-preview-head, .review-workspace-file-head, .review-workspace-mapping-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.review-workspace-preview-head > div, .review-workspace-file-head > div { min-width: 0; }
+.review-workspace-preview-head strong, .review-workspace-file-head strong { display: block; color: var(--text); font-size: 14px; line-height: 1.35; }
+.review-workspace-preview-head span, .review-workspace-file-head span, .review-workspace-mapping-head > span:last-child { color: var(--muted); font-size: 11px; }
+.review-workspace-total, .review-workspace-language { flex: 0 0 auto; padding: 3px 8px; border: 1px solid rgba(31, 111, 104, .24); border-radius: 999px; background: rgba(31, 111, 104, .07); color: #17685e !important; font-size: 11px !important; font-weight: 750; }
+.review-workspace-file-card { display: grid; gap: 10px; padding: 13px; border: 1px solid rgba(31, 111, 104, .18); border-radius: 11px; background: rgba(255,255,255,.52); }
+.review-workspace-file-head { justify-content: flex-start; }
+.review-workspace-file-icon { display: grid; flex: 0 0 auto; place-items: center; width: 31px; height: 31px; border: 1px solid rgba(48, 111, 214, .22); border-radius: 7px; background: rgba(48, 111, 214, .08); color: #2768ad; font-size: 9px; font-weight: 850; letter-spacing: .25px; }
+.review-workspace-mapping { display: grid; gap: 9px; padding: 11px; border-top: 1px solid rgba(31, 111, 104, .13); }
+.review-workspace-mapping-head { min-height: 21px; }
+.review-workspace-flow { display: grid; grid-template-columns: minmax(0, 1fr) 22px minmax(0, 1fr); align-items: stretch; gap: 7px; }
+.review-workspace-endpoint { min-width: 0; padding: 8px 9px; border: 1px solid #dbe7e3; border-radius: 8px; background: #f8fbfa; }
+.review-workspace-endpoint:last-child { border-color: #d7e2f0; background: #f7faff; }
+.review-workspace-endpoint.is-empty { opacity: .72; }
+.review-workspace-endpoint span { display: block; margin-bottom: 3px; color: var(--muted); font-size: 10px; font-weight: 750; }
+.review-workspace-endpoint strong { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 11px; line-height: 1.42; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.review-workspace-arrow { display: grid; place-items: center; color: #6e91c8; font-size: 16px; }
+.review-workspace-reference { padding-left: 1px; color: #5d7186; font-size: 11px; }
+.review-workspace-samples { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.review-workspace-sample { min-width: 0; padding: 8px; border: 1px solid #e0e8ed; border-radius: 8px; background: rgba(249,251,252,.82); }
+.review-workspace-sample > span { display: block; overflow: hidden; margin-bottom: 6px; color: #78879a; font-size: 10px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.review-workspace-sample-values { display: grid; gap: 6px; }
+.review-workspace-sample-source, .review-workspace-sample-target { display: -webkit-box; overflow: hidden; padding-left: 7px; border-left: 2px solid #adc8bc; color: #42556b; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.review-workspace-sample-target { border-left-color: #9ab8e5; color: #284c78; }
+.review-workspace-empty { padding: 9px; color: var(--muted); font-size: 12px; }
+.review-workspace-notes { border-top: 1px solid rgba(31, 111, 104, .14); color: var(--muted); }
+.review-workspace-notes summary { padding-top: 9px; cursor: pointer; font-size: 11px; font-weight: 750; }
+.review-workspace-note-copy { display: grid; gap: 5px; padding-top: 7px; }
+.review-workspace-note-copy p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .review-chat-message.error { color: var(--danger); }
 .review-chat-message-meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
 .review-decision-actions { display: grid; gap: 9px; margin-top: 12px; }
@@ -5563,6 +5593,24 @@ dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdr
 .review-conversation-messages { padding: 24px clamp(18px, 7%, 84px); gap: 16px; }
 .review-chat-message.user { border: 1px solid rgba(131,166,235,.30); border-radius: 12px 12px 3px 12px; background: rgba(93,141,255,.15); color: #e9f1ff; }
 .review-chat-message.workspace-report { border-color: rgba(88,215,194,.26); border-radius: var(--radius-md); background: rgba(18,50,60,.44); color: #dcece9; box-shadow: inset 0 1px 0 rgba(255,255,255,.05); }
+.review-workspace-preview-head strong, .review-workspace-file-head strong { color: #eaf4f5; }
+.review-workspace-preview-head span, .review-workspace-file-head span, .review-workspace-mapping-head > span:last-child { color: #8ea8ba; }
+.review-workspace-total, .review-workspace-language { border-color: rgba(88,215,194,.30); background: rgba(88,215,194,.10); color: #9feadd !important; }
+.review-workspace-file-card { border-color: rgba(88,215,194,.20); border-radius: 8px; background: rgba(6,20,34,.34); }
+.review-workspace-file-icon { border-color: rgba(130,165,236,.32); border-radius: 5px; background: rgba(93,141,255,.13); color: #bcd2ff; }
+.review-workspace-mapping { border-top-color: rgba(100,173,179,.18); }
+.review-workspace-endpoint { border-color: rgba(88,215,194,.20); border-radius: 6px; background: rgba(27,73,76,.24); }
+.review-workspace-endpoint:last-child { border-color: rgba(130,165,236,.25); background: rgba(34,53,88,.28); }
+.review-workspace-endpoint span, .review-workspace-reference { color: #94adb9; }
+.review-workspace-endpoint strong { color: #dcece9; }
+.review-workspace-arrow { color: #91b4f1; }
+.review-workspace-sample { border-color: rgba(112,145,196,.24); border-radius: 6px; background: rgba(4,14,27,.28); }
+.review-workspace-sample > span { color: #829bb3; }
+.review-workspace-sample-source { border-left-color: #5cbcae; color: #bfdbd7; }
+.review-workspace-sample-target { border-left-color: #7da9ee; color: #cbdbfb; }
+.review-workspace-empty { color: #94aabc; }
+.review-workspace-notes { border-top-color: rgba(100,173,179,.18); color: #97adba; }
+.review-workspace-note-copy p { color: #9fb5c3; }
 .review-chat-message-meta { color: #8397b4; }
 .review-composer { margin: 0 clamp(18px, 7%, 84px) 20px; border-color: rgba(127,161,219,.50); border-radius: var(--radius-md); background: rgba(15,29,51,.76); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 14px 32px rgba(0,0,0,.20); backdrop-filter: blur(16px) saturate(125%); }
 .review-composer.dragging { border-color: #83e4d2; background: rgba(25,78,82,.48); }
@@ -5590,6 +5638,15 @@ dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdr
 .review-import-mode-icon { border-radius: 5px; background: rgba(83,112,164,.20); color: #aec2e2; }
 .review-import-mode-option.selected .review-import-mode-icon { background: rgba(93,141,255,.20); color: #c6d6ff; }
 .review-mapping-preset-panel { border-color: rgba(112,145,196,.30); border-radius: var(--radius-md); background: rgba(7,15,30,.34); }
+.sheet-tab { border-color: rgba(112,145,196,.36); border-radius: 5px; background: rgba(9,18,34,.44); color: #9eb2ce; }
+.sheet-tab:hover { border-color: rgba(154,187,245,.62); background: rgba(50,76,121,.28); color: #e7efff; }
+.sheet-tab.active { border-color: rgba(131,168,242,.70); background: rgba(93,141,255,.16); color: #dbe8ff; }
+.mapping-template-bar { border-color: rgba(112,145,196,.34); border-radius: 8px; background: rgba(9,18,34,.44); }
+.mapping-row { border-color: rgba(112,145,196,.36); border-radius: 8px; background: rgba(9,18,34,.44); }
+.mapping-col-id { color: #aabfff; }
+.mapping-header { color: #e8f1ff; }
+.mapping-row select, .mapping-row input[type="text"] { border-radius: 5px; background: rgba(4,13,28,.74); color: #e3ecfb; }
+.mapping-row select:disabled, .mapping-row input[type="text"]:disabled { border-color: rgba(91,112,147,.28); background: rgba(5,12,24,.42); color: #71839b; opacity: 1; }
 .review-attachment-mapping-card > .modal-footer { border-top-color: rgba(104,137,188,.23); background: rgba(8,16,30,.32); }
 .review-target-tab.active { border-color: rgba(164,193,255,.58); background: linear-gradient(115deg, rgba(122,164,255,.34), rgba(90,215,194,.15)); color: #f2f7ff; box-shadow: inset 0 1px 0 rgba(255,255,255,.24); }
 .review-send-button { min-width: 76px; border-radius: 5px; }
@@ -5629,6 +5686,7 @@ dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdr
   .review-composer-footer { align-items: stretch; flex-direction: column; }
   .review-composer-tools { width: 100%; }
   .review-send-button { align-self: flex-end; }
+  .review-workspace-samples { grid-template-columns: 1fr; }
   .review-inline-progress { grid-template-columns: auto 1fr; }
   .review-inline-progress > :last-child { grid-column: 1 / -1; }
   .review-language-popover { bottom: 48px; left: 8px !important; width: calc(100% - 16px); }
@@ -5649,6 +5707,8 @@ dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdr
   .review-decision-other-row { align-items: stretch; flex-direction: column; }
   .review-decision-other-row input { width: 100%; min-width: 0; }
   .review-decision-other-row button { align-self: flex-end; }
+  .review-workspace-flow { grid-template-columns: 1fr; gap: 5px; }
+  .review-workspace-arrow { height: 16px; transform: rotate(90deg); }
   .review-language-options { grid-template-columns: 1fr; max-height: 280px; }
 }
 
@@ -5925,6 +5985,7 @@ input:disabled, select:disabled {
 .review-request-item strong { color: #dce8f8; font-size: 12px; font-weight: 650; }
 .review-request-item span { overflow: hidden; color: #9fb0c7; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .review-request-item em { color: #f0c46e; font-size: 11px; font-style: normal; }
+.review-request-more { padding: 3px 2px 0; color: #8296b2; font-size: 11px; }
 .review-request-empty { padding: 10px; color: #7f92ad; font-size: 12px; }
 @media (max-width: 700px) {
   .review-request-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -5956,6 +6017,7 @@ let appUpdateState = {
   asset_name: "",
   message: "",
 };
+let appUpdateAutoPrompted = false;
 let latestResultFile = "";
 let availableModels = [];
 let currentProviderName = "DeepSeek";
@@ -7128,7 +7190,8 @@ function renderReviewRequestQueue(task = {}) {
     return;
   }
   const totalItems = states.reduce((sum, item) => sum + Math.max(0, Number(item.item_count || 0)), 0);
-  summary.textContent = `共 ${states.length} 个请求 · ${totalItems} 条`;
+  const completedRequests = states.filter((item) => String(item.status || "queued") === "completed").length;
+  summary.textContent = `已完成 ${completedRequests} / ${states.length} 个请求 · ${totalItems} 条`;
   REVIEW_REQUEST_STATUS_LANES.forEach(([status, label]) => {
     const items = states.filter((item) => String(item.status || "queued") === status);
     if (!items.length && status === "failed") return;
@@ -7139,7 +7202,7 @@ function renderReviewRequestQueue(task = {}) {
     const heading = document.createElement("strong");
     heading.textContent = label;
     const count = document.createElement("span");
-    count.textContent = String(items.length);
+    count.textContent = status === "completed" ? `${items.length} / ${states.length}` : String(items.length);
     head.append(heading, count);
     const body = document.createElement("div");
     body.className = "review-request-items";
@@ -7149,7 +7212,7 @@ function renderReviewRequestQueue(task = {}) {
       empty.textContent = "—";
       body.appendChild(empty);
     } else {
-      items.forEach((item) => {
+      items.slice(0, 3).forEach((item) => {
         const entry = document.createElement("div");
         entry.className = "review-request-item";
         const title = document.createElement("strong");
@@ -7165,6 +7228,12 @@ function renderReviewRequestQueue(task = {}) {
         }
         body.appendChild(entry);
       });
+      if (items.length > 3) {
+        const more = document.createElement("div");
+        more.className = "review-request-more";
+        more.textContent = `另有 ${items.length - 3} 个请求，已折叠显示`;
+        body.appendChild(more);
+      }
     }
     lane.append(head, body);
     columns.appendChild(lane);
@@ -8321,15 +8390,148 @@ function renderReviewConversationSnapshot() {
   renderReviewConversationResults(snapshot.task_results || []);
 }
 
+function renderWorkspaceReportPreview(message) {
+  const plan = message.payload || {};
+  const files = Array.isArray(plan.file_summaries) ? plan.file_summaries : [];
+  if (!files.length) return null;
+  const totalUnits = (plan.targets || []).reduce(
+    (total, target) => total + (Array.isArray(target?.units) ? target.units.length : 0), 0,
+  );
+  const preview = document.createElement("section");
+  preview.className = "review-workspace-preview";
+  const previewHead = document.createElement("div");
+  previewHead.className = "review-workspace-preview-head";
+  const headCopy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "识别预览";
+  const subtitle = document.createElement("span");
+  subtitle.textContent = "请核对列映射与同一行样例";
+  headCopy.append(title, subtitle);
+  const count = document.createElement("span");
+  count.className = "review-workspace-total";
+  count.textContent = `${totalUnits} 条待审校`;
+  previewHead.append(headCopy, count);
+  preview.appendChild(previewHead);
+
+  files.forEach((file) => {
+    const fileCard = document.createElement("section");
+    fileCard.className = "review-workspace-file-card";
+    const fileHead = document.createElement("div");
+    fileHead.className = "review-workspace-file-head";
+    const fileIcon = document.createElement("span");
+    fileIcon.className = "review-workspace-file-icon";
+    fileIcon.textContent = String(file.file_type || "file").slice(0, 4).toUpperCase();
+    const fileCopy = document.createElement("div");
+    const filename = document.createElement("strong");
+    filename.textContent = file.filename || "未命名文件";
+    const fileMeta = document.createElement("span");
+    fileMeta.textContent = file.mappings?.length ? `${file.mappings.length} 组映射` : (file.structure_label || "未形成审校映射");
+    fileCopy.append(filename, fileMeta);
+    fileHead.append(fileIcon, fileCopy);
+    fileCard.appendChild(fileHead);
+
+    const mappings = Array.isArray(file.mappings) ? file.mappings : [];
+    if (!mappings.length) {
+      const empty = document.createElement("div");
+      empty.className = "review-workspace-empty";
+      empty.textContent = file.structure_label || "尚未形成可执行映射";
+      fileCard.appendChild(empty);
+    }
+    mappings.forEach((mapping) => {
+      const mappingCard = document.createElement("div");
+      mappingCard.className = "review-workspace-mapping";
+      const mappingHead = document.createElement("div");
+      mappingHead.className = "review-workspace-mapping-head";
+      const language = document.createElement("span");
+      language.className = "review-workspace-language";
+      language.textContent = mapping.language || "自动识别";
+      const mappingCount = document.createElement("span");
+      mappingCount.textContent = `${mapping.count || 0} 条`;
+      mappingHead.append(language, mappingCount);
+      const flow = document.createElement("div");
+      flow.className = "review-workspace-flow";
+      const makeEndpoint = (label, value, muted = false) => {
+        const endpoint = document.createElement("div");
+        endpoint.className = `review-workspace-endpoint${muted ? " is-empty" : ""}`;
+        const endpointLabel = document.createElement("span");
+        endpointLabel.textContent = label;
+        const endpointValue = document.createElement("strong");
+        endpointValue.textContent = value || (label === "原文" ? "无源文" : "未识别");
+        endpoint.append(endpointLabel, endpointValue);
+        return endpoint;
+      };
+      flow.append(
+        makeEndpoint("原文", mapping.source_location, !mapping.source_location),
+        Object.assign(document.createElement("span"), { className: "review-workspace-arrow", textContent: "→" }),
+        makeEndpoint("译文", mapping.target_location),
+      );
+      mappingCard.append(mappingHead, flow);
+      if (mapping.reference_locations) {
+        const reference = document.createElement("div");
+        reference.className = "review-workspace-reference";
+        reference.textContent = `同一行上下文：${mapping.reference_locations}`;
+        mappingCard.appendChild(reference);
+      }
+      const samples = Array.isArray(mapping.samples) ? mapping.samples : [];
+      if (samples.length) {
+        const samplesGrid = document.createElement("div");
+        samplesGrid.className = "review-workspace-samples";
+        samples.slice(0, 3).forEach((sample, index) => {
+          const sampleCard = document.createElement("article");
+          sampleCard.className = "review-workspace-sample";
+          const sampleMeta = document.createElement("span");
+          sampleMeta.textContent = `样例 ${index + 1}${sample.position ? ` · ${sample.position}` : ""}`;
+          const values = document.createElement("div");
+          values.className = "review-workspace-sample-values";
+          const source = document.createElement("div");
+          source.className = "review-workspace-sample-source";
+          source.textContent = sample.source || "无源文";
+          const target = document.createElement("div");
+          target.className = "review-workspace-sample-target";
+          target.textContent = sample.target || "（空译文）";
+          values.append(source, target);
+          sampleCard.append(sampleMeta, values);
+          samplesGrid.appendChild(sampleCard);
+        });
+        mappingCard.appendChild(samplesGrid);
+      }
+      fileCard.appendChild(mappingCard);
+    });
+    preview.appendChild(fileCard);
+  });
+  if ((plan.assumptions || []).length || (plan.warnings || []).length) {
+  const notes = document.createElement("details");
+  notes.className = "review-workspace-notes";
+  notes.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "查看识别依据与注意事项";
+    const noteCopy = document.createElement("div");
+    noteCopy.className = "review-workspace-note-copy";
+    [...(plan.assumptions || []), ...(plan.warnings || [])].slice(0, 5).forEach((note) => {
+      const row = document.createElement("p");
+      row.textContent = note;
+      noteCopy.appendChild(row);
+    });
+    notes.append(summary, noteCopy);
+    preview.appendChild(notes);
+  }
+  return preview;
+}
+
 function renderReviewMessages(messages, questions) {
   const container = $("reviewConversationMessages");
   container.innerHTML = "";
   messages.forEach((message) => {
     const item = document.createElement("div");
     item.className = `review-chat-message ${message.role === "user" ? "user" : "assistant"} ${message.kind === "error" ? "error" : ""} ${message.kind === "workspace_report" ? "workspace-report" : ""}`.trim();
-    const content = document.createElement("div");
-    content.textContent = message.content || "";
-    item.appendChild(content);
+    const workspacePreview = message.kind === "workspace_report" ? renderWorkspaceReportPreview(message) : null;
+    if (workspacePreview) {
+      item.appendChild(workspacePreview);
+    } else {
+      const content = document.createElement("div");
+      content.textContent = message.content || "";
+      item.appendChild(content);
+    }
     const attachments = Array.isArray(message.payload?.attachments) ? message.payload.attachments : [];
     if (attachments.length) {
       const files = document.createElement("div");
@@ -9611,6 +9813,10 @@ function applyAppUpdateState(data) {
     message: String(data?.message || ""),
   };
   renderAppUpdateNotice();
+  if (appUpdateState.update_available && !appUpdateAutoPrompted) {
+    appUpdateAutoPrompted = true;
+    window.setTimeout(openAppUpdateModal, 180);
+  }
 }
 
 async function loadAppUpdateInfo() {
