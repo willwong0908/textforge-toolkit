@@ -8548,7 +8548,9 @@ function renderWorkspaceReportPreview(message) {
   const files = Array.isArray(plan.file_summaries) ? plan.file_summaries : [];
   if (!files.length) return null;
   const totalUnits = (plan.targets || []).reduce(
-    (total, target) => total + (Array.isArray(target?.units) ? target.units.length : 0), 0,
+    (total, target) => total + (
+      Array.isArray(target?.units) ? target.units.length : Number(target?.unit_count || 0)
+    ), 0,
   );
   const preview = document.createElement("section");
   preview.className = "review-workspace-preview";

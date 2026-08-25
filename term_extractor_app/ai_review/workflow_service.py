@@ -9,7 +9,14 @@ from .cache_service import create_batch, get_batch, replace_batch_items
 from .database import get_connection, loads_json
 from .prompt_service import get_prompt_template
 from .review_service import create_review_task, get_review_results, get_review_task
-from .session_store import add_message, emit_event, get_session_snapshot, link_task, update_session
+from .session_store import (
+    add_message,
+    emit_event,
+    get_session_snapshot,
+    link_task,
+    release_completed_session_cache,
+    update_session,
+)
 from .workspace_service import save_confirmed_profile
 from ..telemetry import track_event
 
@@ -191,5 +198,16 @@ def _monitor_session_tasks(session_id: str, links: list[dict[str, str]]) -> None
                 {"status": status, "outputs": outputs},
             )
             emit_event(session_id, "review.completed", {"status": status, "outputs": outputs})
+            # The output files and normalized result rows remain available for
+            # preview/detail.  Release only copies and duplicated payloads that
+            # can be regenerated from the original input.
+            try:
+                cleanup = release_completed_session_cache(session_id)
+                if any(cleanup.values()):
+                    emit_event(session_id, "review.cache_released", cleanup)
+            except Exception:
+                # Cache maintenance must never turn a completed review into a
+                # failed one. The next completed session can attempt it again.
+                pass
             return
         time.sleep(0.5)

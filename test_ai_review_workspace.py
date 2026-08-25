@@ -469,6 +469,97 @@ class WorkspaceSessionTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertIsNone(session_store.get_session(session["id"]))
 
+    def test_completed_session_releases_source_copy_and_duplicate_content_cache(self) -> None:
+        session = session_store.create_session(source_language="英语", target_languages=["简体中文"])
+        attachment = session_store.add_attachment(
+            session["id"], "completed.csv", "Source,Target\nHello,你好\n".encode("utf-8")
+        )
+        stored_copy = Path(attachment["stored_path"])
+        run = session_store.create_workspace_run(
+            session["id"], model="configured-model", input_signature="completed-run", attachment_ids=[attachment["id"]]
+        )
+        full_plan = {
+            "source_language": "英语",
+            "targets": [{
+                "language": "简体中文",
+                "units": [{"id": "unit-1", "source_text": "Hello", "target_text": "你好"}],
+            }],
+            "assumptions": ["已确认映射"],
+            "warnings": [],
+            "confidence": 0.97,
+            "file_summaries": [{"filename": "completed.csv", "mappings": [{"count": 1, "samples": [{"source": "Hello", "target": "你好"}]}]}],
+        }
+        session_store.update_workspace_run(run["id"], status="ready", plan=full_plan)
+        session_store.add_message(
+            session["id"], "assistant", "workspace_report", "已完成文件识别。",
+            {**full_plan, "_workspace_run_id": run["id"]},
+        )
+        now = database.utc_now()
+        with database.get_connection() as conn:
+            conn.execute(
+                "UPDATE review_attachments SET file_type = 'csv', status = 'ready', manifest_json = ? WHERE id = ?",
+                (json.dumps({
+                    "reader_name": "delimited", "file_type": "csv", "filename": "completed.csv",
+                    "file_hash": attachment["file_hash"], "structure": {"headers": ["Source", "Target"]},
+                    "samples": [{"text": "Hello"}], "block_count": 2,
+                }, ensure_ascii=False), attachment["id"]),
+            )
+            conn.execute(
+                """
+                INSERT INTO review_tasks (
+                    id, batch_id, session_id, target_language, status, total_count, output_path, config_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'completed', 1, ?, '{}', ?, ?)
+                """,
+                ("task-1", "batch-1", session["id"], "简体中文", str(self.db_path.parent / "result.xlsx"), now, now),
+            )
+            conn.execute(
+                "INSERT INTO review_session_tasks (session_id, target_language, task_id, created_at) VALUES (?, ?, ?, ?)",
+                (session["id"], "简体中文", "task-1", now),
+            )
+            conn.execute(
+                """
+                INSERT INTO review_results (
+                    id, task_id, item_id, cache_key, status, raw_result_json, created_at, updated_at
+                ) VALUES ('result-1', 'task-1', 'unit-1', 'cache-1', 'completed', '{\"id\": \"unit-1\"}', ?, ?)
+                """,
+                (now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO ai_result_cache (
+                    cache_key, source_text, target_text, model, prompt_signature, directional_signature, result_json, created_at, updated_at
+                ) VALUES ('cache-1', 'Hello', '你好', 'configured-model', 'prompt', 'direction', '{\"id\": \"unit-1\"}', ?, ?)
+                """,
+                (now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO extraction_profiles (signature, reader_name, plan_json, confirmed_count, created_at, updated_at)
+                VALUES ('structure-profile', 'workspace', '{}', 1, ?, ?)
+                """,
+                (now, now),
+            )
+        session_store.update_session(session["id"], status="completed")
+
+        summary = session_store.release_completed_session_cache(session["id"])
+        self.assertEqual(summary["released_attachment_count"], 1)
+        self.assertGreater(summary["released_bytes"], 0)
+        self.assertEqual(summary["removed_result_cache_entries"], 1)
+        self.assertFalse(stored_copy.exists())
+
+        snapshot = session_store.get_session_snapshot(session["id"])
+        self.assertEqual(snapshot["attachments"][0]["stored_path"], "")
+        self.assertTrue(snapshot["attachments"][0]["manifest"]["cache_released"])
+        self.assertNotIn("samples", snapshot["attachments"][0]["manifest"])
+        self.assertEqual(snapshot["workspace_runs"][0]["plan"]["targets"][0]["unit_count"], 1)
+        self.assertEqual(snapshot["workspace_runs"][0]["plan"]["targets"][0].get("units"), None)
+        report = next(message for message in snapshot["messages"] if message["kind"] == "workspace_report")
+        self.assertEqual(report["payload"]["targets"][0]["unit_count"], 1)
+        with database.get_connection() as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM ai_result_cache WHERE cache_key = 'cache-1'").fetchone())
+            self.assertEqual(conn.execute("SELECT raw_result_json FROM review_results WHERE id = 'result-1'").fetchone()[0], "{}")
+            self.assertIsNotNone(conn.execute("SELECT 1 FROM extraction_profiles WHERE signature = 'structure-profile'").fetchone())
+
 
 if __name__ == "__main__":
     unittest.main()

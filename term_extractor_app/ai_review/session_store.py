@@ -162,6 +162,231 @@ def delete_session(session_id: str) -> None:
             pass
 
 
+def release_completed_session_cache(session_id: str) -> dict[str, int]:
+    """Drop regenerable payloads after a completed review without losing its results.
+
+    A conversation keeps its result rows, details, and generated Excel files.  The
+    original uploaded copy, however, is no longer needed after every task has
+    produced an output.  Workspace plans and model-result caches also duplicate
+    the reviewed text, so retaining them makes the local database grow quickly.
+    Structural learning is intentionally stored separately in extraction_profiles
+    and is never touched here.
+    """
+    snapshot = get_session_snapshot(session_id)
+    if snapshot is None:
+        raise ValueError("审校会话不存在")
+    if str(snapshot["session"].get("status") or "") not in {"completed", "partial"}:
+        return _empty_cache_release_summary()
+
+    task_ids = [str(item.get("task_id") or "") for item in snapshot.get("tasks", []) if item.get("task_id")]
+    if not task_ids:
+        return _empty_cache_release_summary()
+    placeholders = ",".join("?" for _ in task_ids)
+    final_statuses = {"completed", "completed_with_errors", "failed"}
+    with get_connection() as conn:
+        task_rows = conn.execute(
+            f"SELECT id, status, output_path FROM review_tasks WHERE id IN ({placeholders})", task_ids
+        ).fetchall()
+    if len(task_rows) != len(task_ids) or any(str(row["status"] or "") not in final_statuses for row in task_rows):
+        return _empty_cache_release_summary()
+    if not any(str(row["output_path"] or "").strip() for row in task_rows):
+        # Keep the source copy if output generation itself failed.  It may still
+        # be required to repair or rerun this particular conversation.
+        return _empty_cache_release_summary()
+
+    upload_root = UPLOADS_DIR.resolve()
+    released_paths: list[Path] = []
+    released_bytes = 0
+    attachment_updates: list[tuple[str, str]] = []
+    for attachment in snapshot.get("attachments", []):
+        stored_path = Path(str(attachment.get("stored_path") or ""))
+        try:
+            resolved = stored_path.resolve()
+        except OSError:
+            continue
+        if resolved.parent != upload_root:
+            continue
+        try:
+            released_bytes += resolved.stat().st_size
+        except OSError:
+            pass
+        released_paths.append(resolved)
+        attachment_updates.append((dumps_json(_compact_attachment_manifest(attachment.get("manifest") or {})), str(attachment["id"])))
+
+    run_ids = [str(item.get("id") or "") for item in snapshot.get("workspace_runs", []) if item.get("id")]
+    compacted_runs = 0
+    compacted_messages = 0
+    removed_result_cache_entries = 0
+    now = utc_now()
+    with get_connection() as conn:
+        if attachment_updates:
+            conn.executemany(
+                "UPDATE review_attachments SET stored_path = '', manifest_json = ?, updated_at = ? WHERE id = ?",
+                [(manifest_json, now, attachment_id) for manifest_json, attachment_id in attachment_updates],
+            )
+
+        if run_ids:
+            run_placeholders = ",".join("?" for _ in run_ids)
+            runs = conn.execute(
+                f"SELECT id, plan_json FROM workspace_runs WHERE id IN ({run_placeholders})", run_ids
+            ).fetchall()
+            compacted_run_rows = [
+                (dumps_json(_compact_workspace_plan(loads_json(row["plan_json"], {}))), now, str(row["id"]))
+                for row in runs
+            ]
+            if compacted_run_rows:
+                conn.executemany(
+                    "UPDATE workspace_runs SET plan_json = ?, updated_at = ? WHERE id = ?", compacted_run_rows
+                )
+                compacted_runs = len(compacted_run_rows)
+
+            messages = conn.execute(
+                "SELECT id, payload_json FROM review_messages WHERE session_id = ? AND kind = 'workspace_report'",
+                (session_id,),
+            ).fetchall()
+            compacted_message_rows: list[tuple[str, str]] = []
+            for row in messages:
+                payload = loads_json(row["payload_json"], {})
+                if str(payload.get("_workspace_run_id") or "") not in run_ids:
+                    continue
+                compacted_message_rows.append((dumps_json(_compact_workspace_plan(payload)), str(row["id"])))
+            if compacted_message_rows:
+                conn.executemany(
+                    "UPDATE review_messages SET payload_json = ? WHERE id = ?", compacted_message_rows
+                )
+                compacted_messages = len(compacted_message_rows)
+
+        cache_rows = conn.execute(
+            f"SELECT DISTINCT cache_key FROM review_results WHERE task_id IN ({placeholders}) AND cache_key <> ''",
+            task_ids,
+        ).fetchall()
+        cache_keys = [str(row["cache_key"]) for row in cache_rows if row["cache_key"]]
+        if cache_keys:
+            cache_placeholders = ",".join("?" for _ in cache_keys)
+            cursor = conn.execute(
+                f"DELETE FROM ai_result_cache WHERE cache_key IN ({cache_placeholders})", cache_keys
+            )
+            removed_result_cache_entries = max(0, int(cursor.rowcount or 0))
+        # The normalized result columns are what the preview, details and Excel
+        # writer consume. raw_result_json is a duplicate of those values.
+        conn.execute(
+            f"UPDATE review_results SET raw_result_json = '{{}}', updated_at = ? WHERE task_id IN ({placeholders})",
+            (now, *task_ids),
+        )
+
+    for path in released_paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _remove_orphaned_private_uploads()
+    return {
+        "released_attachment_count": len(released_paths),
+        "released_bytes": released_bytes,
+        "removed_result_cache_entries": removed_result_cache_entries,
+        "compacted_workspace_runs": compacted_runs,
+        "compacted_workspace_messages": compacted_messages,
+    }
+
+
+def _empty_cache_release_summary() -> dict[str, int]:
+    return {
+        "released_attachment_count": 0,
+        "released_bytes": 0,
+        "removed_result_cache_entries": 0,
+        "compacted_workspace_runs": 0,
+        "compacted_workspace_messages": 0,
+    }
+
+
+def _compact_attachment_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Keep the file shape only; samples contain user content and are regenerable."""
+    structure = dict(manifest.get("structure") or {})
+    if str(manifest.get("file_type") or "") == "excel":
+        structure = {
+            "sheets": [
+                {
+                    "name": sheet.get("name"),
+                    "row_count": sheet.get("row_count"),
+                    "columns": [
+                        {
+                            "index": column.get("index"),
+                            "letter": column.get("letter"),
+                            "header": column.get("header"),
+                        }
+                        for column in sheet.get("columns", [])
+                    ],
+                }
+                for sheet in structure.get("sheets", [])
+            ]
+        }
+    elif str(manifest.get("file_type") or "") in {"csv", "tsv"}:
+        structure = {"headers": list(structure.get("headers") or [])}
+    return {
+        "reader_name": str(manifest.get("reader_name") or ""),
+        "file_type": str(manifest.get("file_type") or ""),
+        "filename": str(manifest.get("filename") or ""),
+        "file_hash": str(manifest.get("file_hash") or ""),
+        "structure": structure,
+        "block_count": int(manifest.get("block_count") or 0),
+        "warnings": list(manifest.get("warnings") or []),
+        "cache_released": True,
+    }
+
+
+def _compact_workspace_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Replace full review units with the compact preview retained in chat."""
+    compacted = {
+        "source_language": plan.get("source_language") or "auto",
+        "targets": [
+            {
+                "language": target.get("language") or "auto",
+                "unit_count": len(target.get("units") or []) if isinstance(target.get("units"), list) else int(target.get("unit_count") or 0),
+            }
+            for target in plan.get("targets", [])
+            if isinstance(target, dict)
+        ],
+        "assumptions": list(plan.get("assumptions") or [])[:5],
+        "warnings": list(plan.get("warnings") or [])[:5],
+        "confidence": plan.get("confidence", 0),
+        "needs_input": False,
+        "question": "",
+        "file_summaries": list(plan.get("file_summaries") or []),
+        "cache_hit": bool(plan.get("cache_hit")),
+        "cache_released": True,
+    }
+    for key in ("_thinking_text", "_workspace_run_id"):
+        if key in plan:
+            compacted[key] = plan[key]
+    return compacted
+
+
+def _remove_orphaned_private_uploads() -> None:
+    """Remove only unreferenced UUID upload copies; never touch source paths."""
+    if not UPLOADS_DIR.exists():
+        return
+    upload_root = UPLOADS_DIR.resolve()
+    with get_connection() as conn:
+        attachment_rows = conn.execute(
+            "SELECT stored_path FROM review_attachments WHERE stored_path <> ''"
+        ).fetchall()
+        legacy_rows = conn.execute("SELECT stored_path FROM file_batches").fetchall()
+    claimed: set[Path] = set()
+    for row in [*attachment_rows, *legacy_rows]:
+        try:
+            path = Path(str(row["stored_path"] or "")).resolve()
+        except OSError:
+            continue
+        if path.parent == upload_root:
+            claimed.add(path)
+    for child in upload_root.iterdir():
+        try:
+            if child.is_file() and child.resolve() not in claimed:
+                child.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def add_attachment(
     session_id: str,
     filename: str,
