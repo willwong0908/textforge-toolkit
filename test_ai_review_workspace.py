@@ -23,7 +23,6 @@ from term_extractor_app.ai_review.workspace_service import (
 def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     prompt = messages[-1]["content"]
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
-    content_files = list(manifests)
     targets: list[dict[str, object]] = []
     for attachment_id, manifest in manifests.items():
         if manifest["file_type"] == "direct_text":
@@ -42,11 +41,8 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
                 {"language": "日语", "mappings": [{"attachment_id": attachment_id, "scope": "table", "source_column_index": 0, "target_column_index": 2}]},
             ])
     response = json.dumps({
-        "content_files": content_files,
-        "reference_files": [],
         "source_language": "auto",
         "targets": targets,
-        "relationships": [],
         "assumptions": ["Workspace Agent 已根据结构清单确认映射。"],
         "warnings": [],
         "confidence": 0.97,
@@ -64,9 +60,9 @@ def _workspace_auto_direct_response(messages: list[dict[str, str]], on_delta=Non
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
     attachment_id = next(iter(manifests))
     response = json.dumps({
-        "content_files": [attachment_id], "reference_files": [], "source_language": "auto",
+        "source_language": "auto",
         "targets": [{"language": "auto", "mappings": [{"attachment_id": attachment_id, "target_pointer": "direct:1"}]}],
-        "relationships": [], "assumptions": [], "warnings": [], "confidence": 0.97,
+        "assumptions": [], "warnings": [], "confidence": 0.97,
         "needs_input": False, "question": "",
     }, ensure_ascii=False)
     if on_delta:
@@ -237,12 +233,12 @@ class WorkspaceSessionTests(unittest.TestCase):
             prompts.append(messages[-1]["content"])
             response = json.dumps(
                 {
-                    "content_files": [attachment["id"]], "reference_files": [], "source_language": "none",
+                    "source_language": "none",
                     "targets": [{"language": "中文", "mappings": [{
                         "attachment_id": attachment["id"], "scope": "document",
                         "source_pointer": None, "target_pointer": "word/document.xml",
                     }]}],
-                    "relationships": [], "assumptions": [], "warnings": [], "confidence": 0.8,
+                    "assumptions": [], "warnings": [], "confidence": 0.8,
                     "needs_input": False, "question": "",
                 },
                 ensure_ascii=False,
@@ -385,7 +381,7 @@ class WorkspaceSessionTests(unittest.TestCase):
         workbook.save(path)
         document = build_default_registry().read(path)
         manifest = document.to_manifest(sample_limit=3)
-        self.assertEqual(manifest["role_hint"], "candidate")
+        self.assertNotIn("role_hint", manifest)
         row_cells = manifest["table_evidence"][0]["row_examples"][0]["cells"]
         self.assertEqual({item["header"] for item in row_cells}, {"speaker", "画面内容", "en", "运镜（参考）"})
 
@@ -401,13 +397,13 @@ class WorkspaceSessionTests(unittest.TestCase):
             self.assertEqual(evidence["row_examples"][0]["cells"][0]["text"], "Host")
             response = json.dumps(
                 {
-                    "content_files": [attachment["id"]], "reference_files": [], "source_language": "中文",
+                    "source_language": "中文",
                     "targets": [{"language": "en", "mappings": [{
                         "attachment_id": attachment["id"], "scope": "Sheet1",
                         "source_column_index": 1, "target_column_index": 2,
                         "reference_column_indexes": [0],
                     }]}],
-                    "relationships": [], "assumptions": [], "warnings": [], "confidence": 0.97,
+                    "assumptions": [], "warnings": [], "confidence": 0.97,
                     "needs_input": False, "question": "",
                 },
                 ensure_ascii=False,
@@ -423,9 +419,14 @@ class WorkspaceSessionTests(unittest.TestCase):
         ):
             plan = inspect_workspace_sync(session["id"])
         self.assertTrue(prompts)
+        self.assertNotIn("content_files", prompts[-1])
+        self.assertNotIn("reference_files", prompts[-1])
+        self.assertNotIn("relationships", prompts[-1])
+        self.assertNotIn("role_hint", prompts[-1])
+        self.assertIn("reference_column_indexes", prompts[-1])
         units = plan["targets"][0]["units"]
         self.assertEqual(units[0]["references"], [{"category": "speaker", "value": "Host", "pointer": "sheet:Sheet1/cell:A2"}])
-        self.assertEqual(plan["file_summaries"][0]["role"], "content")
+        self.assertNotIn("role", plan["file_summaries"][0])
         self.assertEqual(plan["file_summaries"][0]["mappings"][0]["reference_locations"], "speaker")
 
     def test_delete_session_removes_private_attachments(self) -> None:

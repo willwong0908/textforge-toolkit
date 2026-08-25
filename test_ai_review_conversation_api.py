@@ -32,8 +32,7 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
             {"language": "日语", "mappings": [{"attachment_id": attachment_id, "scope": "table", "source_column_index": 0, "target_column_index": 2}]},
         ]
     response = json.dumps({
-        "content_files": [attachment_id], "reference_files": [], "source_language": "英语",
-        "targets": targets, "relationships": [], "assumptions": ["Workspace Agent 已确认映射。"],
+        "source_language": "英语", "targets": targets, "assumptions": ["Workspace Agent 已确认映射。"],
         "warnings": [], "confidence": 0.97, "needs_input": False, "question": "",
     }, ensure_ascii=False)
     if on_delta:

@@ -2944,7 +2944,7 @@ INDEX_HTML = """<!doctype html>
               <label class="review-import-mode-option">
                 <input type="radio" name="reviewAttachmentMappingMode" value="ai" checked />
                 <span class="review-import-mode-icon review-import-mode-ai" aria-hidden="true">✦</span>
-                <span><strong>AI 识别 <em>默认</em></strong><small>由 Workspace Agent 判断原文、译文和文件关系</small></span>
+                <span><strong>AI 识别 <em>默认</em></strong><small>由 Workspace Agent 判断原文、译文和同一行上下文列</small></span>
                 <i aria-hidden="true">✓</i>
               </label>
               <label class="review-import-mode-option">
@@ -6138,8 +6138,8 @@ const TOOL_GUIDES = {
   aiReview: {
     title: "AI 审校工具",
     sections: [
-      ["用途", "由 Workspace Agent 自动理解文件结构和文件关系，再按目标语言分别执行翻译审校与严格校验。"],
-      ["适合处理", ["Excel、XLIFF、CSV 等双语文件", "只有译文的文档或直接粘贴文本", "多文件参考资料与多目标语言项目"]],
+      ["用途", "由 Workspace Agent 自动理解附件结构、原文、译文和同一行上下文列，再按目标语言分别执行翻译审校与严格校验。"],
+      ["适合处理", ["Excel、XLIFF、CSV 等双语文件", "只有译文的文档或直接粘贴文本", "多文件与多目标语言项目"]],
       ["基本用法", ["进入“AI 审校工具”，拖入一个或多个文件，也可以直接输入待审校文本。", "选择提示词、源语言和目标语言后发送。", "检查 Workspace Agent 的识别报告；默认确认后开始审校。", "首批结果会实时显示在会话下方，完成后可打开独立结果文件。"]],
       ["常用设置", ["模型与 API：统一使用工具“模型设置”中的当前配置。", "并发与分包：控制审校速度和单次响应规模。", "禁用词：关联在提示词模板中，由本地确定性规则检查。"]],
     ],

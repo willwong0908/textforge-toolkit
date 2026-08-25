@@ -8,7 +8,7 @@ import re
 import zipfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from xml.etree import ElementTree as ET
 
 from openpyxl.utils import get_column_letter
@@ -39,15 +39,6 @@ def file_sha256(path: Path) -> str:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
-
-
-def _role_hint(filename: str, labels: Iterable[str]) -> str:
-    del labels
-    combined = Path(filename).stem.lower()
-    reference_markers = (
-        "glossary", "termbase", "styleguide", "reference", "术语表", "术语库", "风格指南", "参考资料",
-    )
-    return "reference" if any(marker in combined for marker in reference_markers) else "candidate"
 
 
 class BaseReader(ABC):
@@ -112,13 +103,11 @@ class ExcelReader(BaseReader):
                 )
         if not blocks:
             raise ReaderError("Excel 中没有可读取的正文单元格")
-        labels = [column["header"] for sheet in sheets for column in sheet["columns"]]
         return ReaderDocument(
             reader_name=self.name,
             file_type="excel",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, labels),
             structure={"sheets": sheets},
             blocks=blocks,
         )
@@ -194,7 +183,6 @@ class DelimitedReader(BaseReader):
             file_type=path.suffix.lower().lstrip("."),
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, headers),
             structure={"encoding": encoding, "delimiter": delimiter, "headers": headers, "row_count": len(rows)},
             blocks=blocks,
         )
@@ -214,7 +202,6 @@ class TextReader(BaseReader):
             file_type="text",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, []),
             structure={"encoding": encoding, "paragraph_count": len(chunks)},
             blocks=[ReaderBlock(pointer=f"paragraph:{index}", text=value) for index, value in enumerate(chunks, 1)],
         )
@@ -238,7 +225,6 @@ class JsonReader(BaseReader):
             file_type="json",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, [block.label for block in blocks[:50]]),
             structure={"encoding": encoding, "root_type": type(data).__name__, "text_value_count": len(blocks)},
             blocks=blocks,
         )
@@ -269,7 +255,6 @@ class XmlReader(BaseReader):
             file_type="xml",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, counters.keys()),
             structure={"root_tag": root.tag.rsplit("}", 1)[-1], "tag_counts": counters},
             blocks=blocks,
         )
@@ -306,7 +291,6 @@ class DocxReader(OfficeXmlReader):
             file_type="docx",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, []),
             structure={"paragraph_count": len(paragraphs)},
             blocks=[ReaderBlock(pointer=pointer, text=value) for pointer, value in paragraphs],
         )
@@ -325,7 +309,6 @@ class PptxReader(OfficeXmlReader):
             file_type="pptx",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, []),
             structure={"paragraph_count": len(paragraphs)},
             blocks=[ReaderBlock(pointer=pointer, text=value) for pointer, value in paragraphs],
         )
@@ -357,7 +340,6 @@ class PdfReader(BaseReader):
             file_type="pdf",
             filename=original_filename,
             file_hash=file_sha256(path),
-            role_hint=_role_hint(original_filename, []),
             structure={"page_count": len(pdf.pages)},
             blocks=blocks,
         )

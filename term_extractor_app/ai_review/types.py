@@ -22,9 +22,6 @@ class ReaderDocument:
     file_type: str
     filename: str
     file_hash: str
-    # A reader can describe structure, but it cannot reliably decide a file's
-    # business role. Workspace makes that decision from row-aligned evidence.
-    role_hint: str = "candidate"
     structure: dict[str, Any] = field(default_factory=dict)
     blocks: list[ReaderBlock] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -35,7 +32,6 @@ class ReaderDocument:
             "file_type": self.file_type,
             "filename": self.filename,
             "file_hash": self.file_hash,
-            "role_hint": self.role_hint,
             "structure": self.structure,
             "samples": [block.to_dict() for block in self.blocks[:sample_limit]],
             "block_count": len(self.blocks),
@@ -134,9 +130,6 @@ class TargetPlan:
 class ExtractionPlan:
     source_language: str = "auto"
     targets: list[TargetPlan] = field(default_factory=list)
-    content_files: list[str] = field(default_factory=list)
-    reference_files: list[str] = field(default_factory=list)
-    relationships: list[dict[str, str]] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     confidence: float = 0.0
@@ -147,9 +140,6 @@ class ExtractionPlan:
         return {
             "source_language": self.source_language,
             "targets": [target.to_dict() for target in self.targets],
-            "content_files": list(self.content_files),
-            "reference_files": list(self.reference_files),
-            "relationships": list(self.relationships),
             "assumptions": list(self.assumptions),
             "warnings": list(self.warnings),
             "confidence": self.confidence,

@@ -30,10 +30,9 @@ from .types import ExtractionPlan, ReaderBlock, ReviewUnit, TargetPlan
 from ..telemetry import track_event
 
 
-WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent。你只负责理解文件结构和文件关系，不执行审校。
-根据结构清单判断正文、参考资料、原文位置和每种目标语言的译文位置。优先采用已有稳定指针，不要编造不存在的内容。
-“参考资料”分两类：外部术语表/风格指南等完整文件才放入 reference_files；表格中的 speaker、角色、场景、备注、上下文等辅助字段必须作为该 mapping 的 reference_column_indexes，按同一行注入审校包。一个文件含有参考列时，仍可同时是正文文件，绝不能因此把整个文件归为参考资料。
-表格文件必须先检查 table_evidence：它提供按同一行排列的 few-shot 单元格及每列样本，专门用于判断哪两列是原文/译文。不得仅凭文件名、列名或 role_hint 猜测；先对照同一行中各列的实际文本。role_hint 只是本地弱提示：单个文件或同一张表里出现“参考”等列名，绝不代表整个文件是参考资料。若单个文件的同一行内存在中文内容列和 en/ja 等目标语言列，应把它当作正文候选并映射实际成对列；无法确认多列如何一一对应时才提问。
+WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent。你只负责理解附件结构、原文位置和每种目标语言的译文位置，不执行审校。
+所有上传附件都是待审校文件；不要把任何附件分类为“正文”或“参考资料”，不要输出文件间关系，也不要把整份附件当作外部参考内容注入其他文件。优先采用已有稳定指针，不要编造不存在的内容。
+表格中的 speaker、角色、场景、备注、上下文等辅助字段，应当作为该 mapping 的 reference_column_indexes；它们只按同一行注入对应审校单元，绝不改变文件用途。表格文件必须先检查 table_evidence：它提供按同一行排列的 few-shot 单元格及每列样本，专门用于判断哪两列是原文/译文。不得仅凭文件名或列名猜测；先对照同一行中各列的实际文本。若单个文件的同一行内存在中文内容列和 en/ja 等目标语言列，应映射实际成对列；无法确认多列如何一一对应时才提问。
 约束优先级：用户本轮最新的自然语言说明 > 用户明确选择的具体语言/none > 界面中的 auto > 文件名和样例推测。auto 仅表示“请你自行判断”，绝不是用户坚持存在原文或某一源语言的约束；用户先前或界面中是 auto、随后说明“不用原文/全文是译文”时，应结合全文语义和文件结构判断，并可返回 source_language 为 none。不要按单个关键词机械判断，例如“缺失源文”可能是在描述问题而不是要求无原文审校。
 用户选择源语言为 none 时，所有映射都必须把 source_column_index/source_pointer 设为空，并把 source_language 返回为 none，不得补造原文。当你判断没有原文、只需要审校译文时，也必须显式返回 source_language 为 none，并让所有映射的 source_column_index/source_pointer 为空；不能因为没有原文就要求用户补充原文。
 对于 DOCX、PPTX、TXT、PDF、JSON、XML 等非表格正文，target_pointer 可以使用 "*" 表示该附件所有可读文本位置，也可以使用一个文档级指针前缀（例如 word/document.xml）；后端会展开为实际位置。DOCX/PPTX 必须保持 Reader 的段落/文本位置为独立审校单元，绝不能把整篇文档拼成一个审校条目。用户明确无原文时，应优先以这个方式生成可执行的全文译文审校方案。
@@ -41,11 +40,8 @@ WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent。你�
 
 WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单，并返回：
 {{
-  "content_files": ["attachment_id"],
-  "reference_files": ["attachment_id"],
   "source_language": "语言或 auto",
   "targets": [{{"language":"语言", "mappings":[{{"attachment_id":"...", "scope":"工作表名、table 或 document", "source_column_index":"表格原文列的零基索引，可为空", "target_column_index":"表格译文列的零基索引", "reference_column_indexes":[0], "target_pointer":"非表格格式使用精确位置、文档级前缀或 *（全文）", "source_pointer":"非表格格式可为空"}}]}}],
-  "relationships": [{{"from":"attachment_id", "to":"attachment_id", "kind":"reference|translation"}}],
   "assumptions": [], "warnings": [], "confidence": 0.0,
   "needs_input": false, "question": ""
 }}
@@ -222,7 +218,7 @@ def _inspect(
         return plan_data
 
     adjustment = adjustment_text.strip()
-    content_documents = [document for document in documents.values() if document.role_hint != "reference"]
+    content_documents = list(documents.values())
     xliff_local_only = (
         bool(content_documents)
         and not direct_text.strip()
@@ -271,11 +267,10 @@ def _inspect(
                 plan.warnings.append("本轮只保留本地候选映射供核对，未把它当作调整后的正式方案。")
             else:
                 plan.needs_input = True
-                plan.question = "Workspace Agent 未能完成文件关系和正文位置判断。请检查模型配置后重试，或补充文件名、工作表及原文/译文所在列。"
+                plan.question = "Workspace Agent 未能完成附件结构和原文/译文位置判断。请检查模型配置后重试，或补充文件名、工作表及原文/译文所在列。"
                 plan.warnings.append("下方内容只是 Reader 生成的本地候选映射，尚未经过 Workspace Agent 确认。")
     if direct_text.strip():
         _normalize_direct_text_plan(plan, session, documents)
-    _attach_references(plan, documents)
     plan_data = plan.to_dict()
     plan_data["cache_hit"] = cache_hit
     plan_data["file_summaries"] = _build_file_summaries(plan_data, documents)
@@ -329,8 +324,7 @@ def _inspect(
 def _build_deterministic_plan(
     session: dict[str, Any], documents: dict[str, ReaderDocument], direct_text: str
 ) -> ExtractionPlan:
-    content_ids = [attachment_id for attachment_id, doc in documents.items() if doc.role_hint != "reference"]
-    reference_ids = [attachment_id for attachment_id, doc in documents.items() if doc.role_hint == "reference"]
+    content_ids = list(documents)
     targets: dict[str, list[ReviewUnit]] = defaultdict(list)
     assumptions: list[str] = []
     warnings: list[str] = []
@@ -393,7 +387,7 @@ def _build_deterministic_plan(
 
     target_plans = [TargetPlan(language=language, units=units) for language, units in targets.items() if units]
     total_units = sum(len(item.units) for item in target_plans)
-    content_documents = [document for document in documents.values() if document.role_hint != "reference"]
+    content_documents = list(documents.values())
     if target_plans and content_documents and all(document.file_type == "xliff" for document in content_documents):
         confidence = 0.98
     elif any("未发现标准表头" in value or "只有一列" in value or "未发现稳定双语结构" in value for value in assumptions):
@@ -410,17 +404,11 @@ def _build_deterministic_plan(
     return ExtractionPlan(
         source_language=session["source_language"],
         targets=target_plans,
-        content_files=content_ids,
-        reference_files=reference_ids,
-        relationships=[
-            {"from": reference_id, "to": content_id, "kind": "reference"}
-            for reference_id in reference_ids for content_id in content_ids
-        ],
         assumptions=list(dict.fromkeys(assumptions)),
         warnings=warnings,
         confidence=confidence,
         needs_input=total_units == 0,
-        question="无法识别待审校译文，请说明文件关系或正文位置。" if total_units == 0 else "",
+        question="无法识别待审校译文，请说明附件中的原文/译文位置。" if total_units == 0 else "",
     )
 
 
@@ -462,8 +450,7 @@ def _build_preset_plan(
     documents: dict[str, ReaderDocument],
     attachment_settings: dict[str, dict[str, Any]],
 ) -> ExtractionPlan | None:
-    content_ids = [attachment_id for attachment_id, doc in documents.items() if doc.role_hint != "reference"]
-    reference_ids = [attachment_id for attachment_id, doc in documents.items() if doc.role_hint == "reference"]
+    content_ids = list(documents)
     if not content_ids:
         return None
     targets: dict[str, list[ReviewUnit]] = defaultdict(list)
@@ -516,12 +503,6 @@ def _build_preset_plan(
     return ExtractionPlan(
         source_language=selected_source,
         targets=[TargetPlan(language=language, units=units) for language, units in targets.items()],
-        content_files=content_ids,
-        reference_files=reference_ids,
-        relationships=[
-            {"from": reference_id, "to": content_id, "kind": "reference"}
-            for reference_id in reference_ids for content_id in content_ids
-        ],
         assumptions=["已按用户选择的导入映射模板读取：" + "、".join(preset_names)],
         confidence=1.0,
     )
@@ -593,7 +574,7 @@ def _apply_natural_language_adjustment(
     tabular_documents = {
         attachment_id: document
         for attachment_id, document in documents.items()
-        if document.file_type in {"excel", "csv", "tsv"} and document.role_hint != "reference"
+        if document.file_type in {"excel", "csv", "tsv"}
     }
     if not tabular_documents:
         return None
@@ -633,9 +614,7 @@ def _apply_natural_language_adjustment(
         return None
 
     targets: dict[str, list[ReviewUnit]] = defaultdict(list)
-    content_files: list[str] = []
     for attachment_id, document in selected_documents.items():
-        content_files.append(attachment_id)
         scopes = [
             str(item.get("name") or "") for item in (document.structure.get("sheets") or [])
             if str(item.get("name") or "") and str(item.get("name") or "").lower() in lowered
@@ -658,8 +637,6 @@ def _apply_natural_language_adjustment(
     return ExtractionPlan(
         source_language=session.get("source_language") or "auto",
         targets=target_plans,
-        content_files=content_files,
-        reference_files=[attachment_id for attachment_id in documents if attachment_id not in content_files and documents[attachment_id].role_hint == "reference"],
         assumptions=[f"已应用用户调整：原文 {source_label}；{target_label}。"],
         confidence=0.99,
     )
@@ -959,25 +936,9 @@ def _plan_from_agent(
                 )
         if units:
             targets.append(TargetPlan(language=language, units=units))
-    mapped_attachment_ids = {
-        str(unit.metadata.get("attachment_id") or "")
-        for target in targets for unit in target.units
-        if str(unit.metadata.get("attachment_id") or "") in documents
-    }
-    content_files = list(dict.fromkeys([
-        *[value for value in data.get("content_files", []) if value in documents],
-        *mapped_attachment_ids,
-    ]))
-    reference_files = [
-        value for value in data.get("reference_files", [])
-        if value in documents and value not in mapped_attachment_ids
-    ]
     return ExtractionPlan(
         source_language=str(data.get("source_language") or "auto"),
         targets=targets,
-        content_files=content_files,
-        reference_files=reference_files,
-        relationships=[item for item in data.get("relationships", []) if isinstance(item, dict)],
         assumptions=[str(value) for value in data.get("assumptions", [])],
         warnings=[str(value) for value in data.get("warnings", [])],
         confidence=max(0.0, min(float(data.get("confidence") or 0.0), 1.0)),
@@ -1003,34 +964,12 @@ def _resolve_non_tabular_target_blocks(
     return []
 
 
-def _attach_references(plan: ExtractionPlan, documents: dict[str, ReaderDocument]) -> None:
-    reference_blocks = [
-        {"category": doc.filename, "value": block.text, "pointer": block.pointer}
-        for attachment_id, doc in documents.items()
-        if attachment_id in plan.reference_files
-        for block in doc.blocks
-    ]
-    if not reference_blocks:
-        return
-    for target in plan.targets:
-        for unit in target.units:
-            unit_terms = _search_terms(unit.source_text + " " + unit.target_text)
-            scored: list[tuple[int, dict[str, str]]] = []
-            for reference in reference_blocks:
-                score = len(unit_terms & _search_terms(reference["value"]))
-                if score:
-                    scored.append((score, reference))
-            external = [item for _, item in sorted(scored, key=lambda pair: pair[0], reverse=True)[:5]]
-            existing = [item for item in unit.references if str(item.get("value") or "").strip()]
-            unit.references = [*existing, *external][:8]
-
-
 def _get_cached_profile(
     run_id: str, documents: dict[str, ReaderDocument], session: dict[str, Any]
 ) -> ExtractionPlan | None:
     if not documents or any(
         document.file_type not in {"excel", "csv", "tsv"}
-        for document in documents.values() if document.role_hint != "reference"
+        for document in documents.values()
     ):
         return None
     signature = _structure_signature(
@@ -1044,7 +983,7 @@ def _get_cached_profile(
     if not row or not run:
         return None
     profile = loads_json(row["plan_json"], {})
-    if profile.get("profile_version") != 3:
+    if profile.get("profile_version") != 4:
         return None
     attachment_ids = list(documents)
     targets: dict[str, list[ReviewUnit]] = defaultdict(list)
@@ -1073,25 +1012,9 @@ def _get_cached_profile(
         return None
     if not targets:
         return None
-    content_files = [
-        attachment_ids[index]
-        for index in profile.get("content_indices", [])
-        if isinstance(index, int) and 0 <= index < len(attachment_ids)
-    ]
-    reference_files = [
-        attachment_ids[index]
-        for index in profile.get("reference_indices", [])
-        if isinstance(index, int) and 0 <= index < len(attachment_ids)
-    ]
     return ExtractionPlan(
         source_language=str(profile.get("source_language") or session.get("source_language") or "auto"),
         targets=[TargetPlan(language=language, units=units) for language, units in targets.items()],
-        content_files=content_files,
-        reference_files=reference_files,
-        relationships=[
-            {"from": reference_id, "to": content_id, "kind": "reference"}
-            for reference_id in reference_files for content_id in content_files
-        ],
         assumptions=["语言选择和表头结构完全一致，已读取确认过的本地结构缓存。"],
         confidence=0.99,
     )
@@ -1114,7 +1037,7 @@ def save_confirmed_profile(run_id: str) -> None:
         manifests = [loads_json(row["manifest_json"], {}) for row in attachments]
         if not manifests or any(
             item.get("file_type") not in {"excel", "csv", "tsv"}
-            for item in manifests if item.get("role_hint") != "reference"
+            for item in manifests
         ):
             return
         attachment_indexes = {str(row["id"]): index for index, row in enumerate(attachments)}
@@ -1126,10 +1049,8 @@ def save_confirmed_profile(run_id: str) -> None:
         if not session_row:
             return
         profile_plan = {
-            "profile_version": 3,
+            "profile_version": 4,
             "source_language": raw_plan.get("source_language", "auto"),
-            "content_indices": [attachment_indexes[value] for value in raw_plan.get("content_files", []) if value in attachment_indexes],
-            "reference_indices": [attachment_indexes[value] for value in raw_plan.get("reference_files", []) if value in attachment_indexes],
             "mappings": [],
         }
         seen_mappings: set[tuple[Any, ...]] = set()
@@ -1242,7 +1163,6 @@ def _manifest_shape(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "reader_name": manifest.get("reader_name"),
         "file_type": manifest.get("file_type"),
-        "role_hint": manifest.get("role_hint"),
         "structure": header_structure,
     }
 
@@ -1304,11 +1224,6 @@ def _split_direct_text(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"\n\s*\n|\n", text) if part.strip()]
 
 
-def _search_terms(text: str) -> set[str]:
-    words = set(re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}", text.lower()))
-    return {word for word in words if len(word) <= 80}
-
-
 def _parse_json(content: str) -> dict[str, Any]:
     text = content.strip()
     start = text.find("{")
@@ -1331,12 +1246,11 @@ def _format_report(plan: dict[str, Any]) -> str:
         lines.append("审校任务：" + "；".join(target_lines) + "。")
     for file_index, file_info in enumerate(plan.get("file_summaries") or [], 1):
         filename = str(file_info.get("filename") or "未命名文件")
-        role = "参考资料" if file_info.get("role") == "reference" else "正文"
         lines.append("")
-        lines.append(f"文件 {file_index}｜{filename}｜{role}")
+        lines.append(f"文件 {file_index}｜{filename}")
         mappings = file_info.get("mappings") or []
         if not mappings:
-            lines.append(f"  位置：{file_info.get('structure_label') or '未形成正文映射'}")
+            lines.append(f"  位置：{file_info.get('structure_label') or '未形成审校映射'}")
             continue
         for mapping in mappings:
             lines.append(
@@ -1368,7 +1282,6 @@ def _build_file_summaries(
     plan: dict[str, Any], documents: dict[str, ReaderDocument]
 ) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
-    reference_ids = set(plan.get("reference_files") or [])
     targets = plan.get("targets") or []
     for attachment_id, document in documents.items():
         mappings: list[dict[str, Any]] = []
@@ -1426,12 +1339,10 @@ def _build_file_summaries(
                     "samples": samples,
                 }
             )
-        role = "reference" if (attachment_id in reference_ids or document.role_hint == "reference") and not mappings else "content"
         summaries.append(
             {
                 "attachment_id": attachment_id,
                 "filename": document.filename,
-                "role": role,
                 "file_type": document.file_type,
                 "structure_label": _document_structure_label(document),
                 "mappings": mappings,
