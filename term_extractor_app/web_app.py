@@ -5472,6 +5472,25 @@ button:disabled { opacity: .48; }
 .modal-header p, .dialog-head p { color: #a5b5ca; }
 .modal-close, .review-mapping-close { border: 1px solid rgba(116,149,202,.30); border-radius: 5px; background: rgba(89,116,167,.15); color: #b7c8e2; }
 .modal-close:hover, .review-mapping-close:hover { background: rgba(89,116,167,.28); color: #fff; }
+.dialog-body {
+  border: 1px solid rgba(122,154,208,.46);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(145deg, rgba(25,42,71,.96), rgba(12,22,40,.97));
+  color: #eaf1ff;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 28px 80px rgba(0,0,0,.46);
+  backdrop-filter: blur(22px) saturate(125%);
+}
+.dialog-body .dialog-head { padding-bottom: 14px; border-bottom: 1px solid rgba(112,145,196,.24); }
+.dialog-body .dialog-actions { margin-top: 2px; padding-top: 14px; border-top: 1px solid rgba(112,145,196,.20); }
+.dialog-body .icon-button {
+  border: 1px solid rgba(116,149,202,.30);
+  border-radius: 5px;
+  background: rgba(89,116,167,.15);
+  color: #b7c8e2;
+}
+.dialog-body .icon-button:hover { background: rgba(89,116,167,.28); color: #fff; }
+.dialog-body .field label, .dialog-body .mapping-template-hint { color: #aebdd1; }
+.dialog-body .hint { color: #9eb0c8; }
 dialog.modal, .dialog { z-index: 1300; }
 dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdrop-filter: blur(7px); }
 .update-release-notes, .feedback-attachment-card, .feedback-log-card { border-color: rgba(100,132,183,.30); border-radius: var(--radius-md); background: rgba(7,15,30,.38); color: #dbe7f8; }
