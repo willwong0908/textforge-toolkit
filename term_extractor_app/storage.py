@@ -155,7 +155,8 @@ def build_default_settings() -> AppSettings:
             "numeric_normalization_mode": "duplicate_group_only",
             "single_occurrence_approved_policy": "allow_to_library",
             "nontrans_stage_settings": {
-                "chunk_char_limit": 20000,
+                "chunk_char_limit": 5000,
+                "batch_defaults_version": 2,
                 "enable_thinking": True,
                 "reasoning_effort": "low",
                 "builtin_regex_enabled": True,
@@ -193,19 +194,22 @@ def build_default_settings() -> AppSettings:
             ],
             "term_recall_stage_settings": {
                 "single_item_char_limit": 500,
-                "batch_request_char_limit": 20000,
+                "batch_request_char_limit": 5000,
+                "batch_defaults_version": 2,
                 "enable_thinking": True,
                 "reasoning_effort": "low",
             },
             "term_review_stage_settings": {
-                "batch_request_char_limit": 20000,
+                "batch_request_char_limit": 5000,
+                "batch_defaults_version": 2,
                 "max_context_chars": 220,
                 "enable_thinking": True,
                 "reasoning_effort": "low",
             },
             "ai_review_stage_settings": {
-                "batch_request_char_limit": 20000,
-                "max_items_per_request": 80,
+                "batch_request_char_limit": 1500,
+                "max_items_per_request": 20,
+                "packaging_defaults_version": 2,
                 "enable_thinking": True,
                 "workspace_enable_thinking": True,
                 "reasoning_effort": "low",
@@ -542,6 +546,18 @@ class SettingsStore:
         settings.input_defaults.setdefault("term_recall_stage_settings", {})
         settings.input_defaults.setdefault("term_review_stage_settings", {})
         settings.input_defaults.setdefault("ai_review_stage_settings", {})
+        legacy_model_stage_defaults = {
+            stage_key: "batch_defaults_version" not in settings.input_defaults[stage_key]
+            for stage_key in (
+                "nontrans_stage_settings",
+                "term_recall_stage_settings",
+                "term_review_stage_settings",
+            )
+        }
+        legacy_ai_review_defaults = (
+            "packaging_defaults_version"
+            not in settings.input_defaults["ai_review_stage_settings"]
+        )
         settings.input_defaults.setdefault("term_stage_settings", {})
 
         for key, value in defaults.input_defaults["nontrans_stage_settings"].items():
@@ -564,8 +580,11 @@ class SettingsStore:
                 configured_limit = int(stage.get(limit_key) or 0)
             except (TypeError, ValueError):
                 configured_limit = 0
-            if configured_limit <= 6000:
-                stage[limit_key] = 20000
+            if legacy_model_stage_defaults[stage_key] and configured_limit in {0, 3000, 20000}:
+                stage[limit_key] = 5000
+            elif configured_limit <= 0:
+                stage[limit_key] = 5000
+            stage["batch_defaults_version"] = 2
             stage["enable_thinking"] = True
             effort = str(stage.get("reasoning_effort") or "").strip().lower()
             stage["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
@@ -574,8 +593,24 @@ class SettingsStore:
             configured_ai_review_limit = int(ai_review_stage.get("batch_request_char_limit") or 0)
         except (TypeError, ValueError):
             configured_ai_review_limit = 0
-        if configured_ai_review_limit <= 6000:
-            ai_review_stage["batch_request_char_limit"] = 20000
+        try:
+            configured_ai_review_items = int(ai_review_stage.get("max_items_per_request") or 0)
+        except (TypeError, ValueError):
+            configured_ai_review_items = 0
+        # One-time migration from the former 20,000-character / 80-item
+        # product default. Explicit choices made after this migration retain
+        # their configured values, including intentionally larger packages.
+        if legacy_ai_review_defaults and (
+            configured_ai_review_limit <= 0
+            or (configured_ai_review_limit == 20000 and configured_ai_review_items in {0, 80})
+        ):
+            ai_review_stage["batch_request_char_limit"] = 1500
+            ai_review_stage["max_items_per_request"] = 20
+        elif configured_ai_review_limit <= 0:
+            ai_review_stage["batch_request_char_limit"] = 1500
+        if configured_ai_review_items <= 0:
+            ai_review_stage["max_items_per_request"] = 20
+        ai_review_stage["packaging_defaults_version"] = 2
         ai_review_stage["enable_thinking"] = True
         ai_review_stage["workspace_enable_thinking"] = True
         ai_review_effort = str(ai_review_stage.get("reasoning_effort") or "").strip().lower()

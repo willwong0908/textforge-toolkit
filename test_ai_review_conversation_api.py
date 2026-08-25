@@ -191,6 +191,14 @@ class ConversationApiTests(unittest.TestCase):
         )
         self.assertEqual(missing.status_code, 404)
         self.assertIn("找不到原始文件", missing.json()["detail"])
+        relinked_path = Path(self.temp.name) / "moved-original.csv"
+        relinked_path.write_text("Source,Target\nHello,你好\n", encoding="utf-8")
+        relinked = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/relink-original",
+            json={"file_path": str(relinked_path)},
+        )
+        self.assertEqual(relinked.status_code, 200)
+        self.assertEqual(relinked.json()["attachment"]["original_path"], str(relinked_path.resolve()))
 
     def test_delete_requires_confirmation(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]

@@ -22,13 +22,15 @@ class ReaderDocument:
     file_type: str
     filename: str
     file_hash: str
-    role_hint: str = "content"
+    # A reader can describe structure, but it cannot reliably decide a file's
+    # business role. Workspace makes that decision from row-aligned evidence.
+    role_hint: str = "candidate"
     structure: dict[str, Any] = field(default_factory=dict)
     blocks: list[ReaderBlock] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def to_manifest(self, sample_limit: int = 20) -> dict[str, Any]:
-        return {
+        manifest = {
             "reader_name": self.reader_name,
             "file_type": self.file_type,
             "filename": self.filename,
@@ -39,6 +41,68 @@ class ReaderDocument:
             "block_count": len(self.blocks),
             "warnings": list(self.warnings),
         }
+        if self.file_type in {"excel", "csv", "tsv"}:
+            manifest["table_evidence"] = _table_evidence(self.blocks)
+        return manifest
+
+
+def _table_evidence(blocks: list[ReaderBlock]) -> list[dict[str, Any]]:
+    """Keep row-aligned, bounded examples so Workspace can compare table columns."""
+    grouped: dict[str, dict[int, list[ReaderBlock]]] = {}
+    for block in blocks:
+        metadata = block.metadata or {}
+        row = metadata.get("row")
+        column_index = metadata.get("column_index")
+        if not isinstance(row, int) or not isinstance(column_index, int):
+            continue
+        scope = str(metadata.get("sheet") or "table")
+        grouped.setdefault(scope, {}).setdefault(row, []).append(block)
+
+    evidence: list[dict[str, Any]] = []
+    for scope in sorted(grouped)[:3]:
+        rows = grouped[scope]
+        ordered_rows = sorted(rows.items())
+        multi_cell_rows = [(row, cells) for row, cells in ordered_rows if len(cells) > 1]
+        selected_rows = (multi_cell_rows or ordered_rows)[:3]
+        first_by_column: dict[int, ReaderBlock] = {}
+        columns: dict[int, dict[str, Any]] = {}
+        for _row, cells in ordered_rows:
+            for block in cells:
+                metadata = block.metadata or {}
+                column_index = int(metadata["column_index"])
+                columns.setdefault(
+                    column_index,
+                    {
+                        "column_index": column_index,
+                        "column": str(metadata.get("column") or ""),
+                        "header": str(metadata.get("header") or block.label or ""),
+                    },
+                )
+                first_by_column.setdefault(column_index, block)
+
+        def cell(block: ReaderBlock) -> dict[str, Any]:
+            metadata = block.metadata or {}
+            text = " ".join(str(block.text or "").split())
+            return {
+                "column_index": int(metadata["column_index"]),
+                "column": str(metadata.get("column") or ""),
+                "header": str(metadata.get("header") or block.label or ""),
+                "pointer": block.pointer,
+                "text": text[:160] + ("…" if len(text) > 160 else ""),
+            }
+
+        evidence.append(
+            {
+                "scope": scope,
+                "columns": [columns[index] for index in sorted(columns)[:16]],
+                "row_examples": [
+                    {"row": row, "cells": [cell(block) for block in sorted(cells, key=lambda item: int((item.metadata or {}).get("column_index", 0)))[:16]]}
+                    for row, cells in selected_rows
+                ],
+                "column_examples": [cell(first_by_column[index]) for index in sorted(first_by_column)[:16]],
+            }
+        )
+    return evidence
 
 
 @dataclass(slots=True)

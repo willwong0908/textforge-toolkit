@@ -223,7 +223,7 @@ def get_attachment(attachment_id: str) -> dict[str, Any] | None:
 def update_attachment(attachment_id: str, **fields: Any) -> dict[str, Any]:
     allowed = {
         "file_type", "status", "manifest_json", "mapping_mode", "mapping_preset_id",
-        "sent_at", "error_message",
+        "sent_at", "error_message", "original_path",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
     if "manifest_json" in values and not isinstance(values["manifest_json"], str):

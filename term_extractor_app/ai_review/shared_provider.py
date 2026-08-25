@@ -32,8 +32,8 @@ def get_shared_ai_settings() -> dict[str, Any]:
     settings = SettingsStore(get_app_paths()).load()
     ai_review_stage = dict(settings.input_defaults.get("ai_review_stage_settings", {}) or {})
     configured_limit = int(ai_review_stage.get("batch_request_char_limit") or 0)
-    if configured_limit <= 6000:
-        configured_limit = 20000
+    if configured_limit <= 0:
+        configured_limit = 1500
     reasoning_effort = str(ai_review_stage.get("reasoning_effort") or "low").strip().lower()
     if reasoning_effort == "max":
         reasoning_effort = "high"
@@ -47,7 +47,7 @@ def get_shared_ai_settings() -> dict[str, Any]:
         "max_concurrency": int(provider.max_concurrency or 6),
         "max_chars_per_request": configured_limit,
         "enable_thinking": True,
-        "max_items_per_request": int(ai_review_stage.get("max_items_per_request") or 80),
+        "max_items_per_request": max(1, int(ai_review_stage.get("max_items_per_request") or 20)),
         "workspace_enable_thinking": True,
         "reasoning_effort": reasoning_effort,
         "auto_start_after_inspection": bool(ai_review_stage.get("auto_start_after_inspection", False)),

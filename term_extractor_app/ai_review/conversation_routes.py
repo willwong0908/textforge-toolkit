@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -156,6 +157,26 @@ def attach_local_file(session_id: str, payload: LocalAttachmentPayload) -> dict[
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"attachment": attachment}
+
+
+@router.post("/{session_id}/attachments/{attachment_id}/relink-original")
+def relink_attachment_original(
+    session_id: str, attachment_id: str, payload: LocalAttachmentPayload
+) -> dict[str, Any]:
+    attachment = get_attachment(attachment_id)
+    if not attachment or attachment["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    path = Path(str(payload.file_path or "").strip())
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="找不到所选原始文件。")
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"读取原始文件失败：{exc}") from exc
+    if digest != str(attachment.get("file_hash") or ""):
+        raise HTTPException(status_code=400, detail="所选文件与会话附件不一致，不能关联。")
+    updated = update_attachment(attachment_id, original_path=str(path.resolve()))
+    return {"ok": True, "attachment": updated}
 
 
 @router.patch("/{session_id}/attachments/{attachment_id}")

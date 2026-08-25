@@ -10,6 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from openpyxl.utils import get_column_letter
+
 from .database import dumps_json, get_connection, loads_json, utc_now
 from .excel_mapping_service import get_excel_mapping_preset
 from .readers import ReaderDependencyError, ReaderDocument, ReaderError, build_default_registry
@@ -30,6 +32,8 @@ from ..telemetry import track_event
 
 WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent。你只负责理解文件结构和文件关系，不执行审校。
 根据结构清单判断正文、参考资料、原文位置和每种目标语言的译文位置。优先采用已有稳定指针，不要编造不存在的内容。
+“参考资料”分两类：外部术语表/风格指南等完整文件才放入 reference_files；表格中的 speaker、角色、场景、备注、上下文等辅助字段必须作为该 mapping 的 reference_column_indexes，按同一行注入审校包。一个文件含有参考列时，仍可同时是正文文件，绝不能因此把整个文件归为参考资料。
+表格文件必须先检查 table_evidence：它提供按同一行排列的 few-shot 单元格及每列样本，专门用于判断哪两列是原文/译文。不得仅凭文件名、列名或 role_hint 猜测；先对照同一行中各列的实际文本。role_hint 只是本地弱提示：单个文件或同一张表里出现“参考”等列名，绝不代表整个文件是参考资料。若单个文件的同一行内存在中文内容列和 en/ja 等目标语言列，应把它当作正文候选并映射实际成对列；无法确认多列如何一一对应时才提问。
 约束优先级：用户本轮最新的自然语言说明 > 用户明确选择的具体语言/none > 界面中的 auto > 文件名和样例推测。auto 仅表示“请你自行判断”，绝不是用户坚持存在原文或某一源语言的约束；用户先前或界面中是 auto、随后说明“不用原文/全文是译文”时，应结合全文语义和文件结构判断，并可返回 source_language 为 none。不要按单个关键词机械判断，例如“缺失源文”可能是在描述问题而不是要求无原文审校。
 用户选择源语言为 none 时，所有映射都必须把 source_column_index/source_pointer 设为空，并把 source_language 返回为 none，不得补造原文。当你判断没有原文、只需要审校译文时，也必须显式返回 source_language 为 none，并让所有映射的 source_column_index/source_pointer 为空；不能因为没有原文就要求用户补充原文。
 对于 DOCX、PPTX、TXT、PDF、JSON、XML 等非表格正文，target_pointer 可以使用 "*" 表示该附件所有可读文本位置，也可以使用一个文档级指针前缀（例如 word/document.xml）；后端会展开为实际位置。DOCX/PPTX 必须保持 Reader 的段落/文本位置为独立审校单元，绝不能把整篇文档拼成一个审校条目。用户明确无原文时，应优先以这个方式生成可执行的全文译文审校方案。
@@ -40,7 +44,7 @@ WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单�
   "content_files": ["attachment_id"],
   "reference_files": ["attachment_id"],
   "source_language": "语言或 auto",
-  "targets": [{{"language":"语言", "mappings":[{{"attachment_id":"...", "scope":"工作表名、table 或 document", "source_column_index":"表格原文列的零基索引，可为空", "target_column_index":"表格译文列的零基索引", "target_pointer":"非表格格式使用精确位置、文档级前缀或 *（全文）", "source_pointer":"非表格格式可为空"}}]}}],
+  "targets": [{{"language":"语言", "mappings":[{{"attachment_id":"...", "scope":"工作表名、table 或 document", "source_column_index":"表格原文列的零基索引，可为空", "target_column_index":"表格译文列的零基索引", "reference_column_indexes":[0], "target_pointer":"非表格格式使用精确位置、文档级前缀或 *（全文）", "source_pointer":"非表格格式可为空"}}]}}],
   "relationships": [{{"from":"attachment_id", "to":"attachment_id", "kind":"reference|translation"}}],
   "assumptions": [], "warnings": [], "confidence": 0.0,
   "needs_input": false, "question": ""
@@ -275,15 +279,12 @@ def _inspect(
     plan_data = plan.to_dict()
     plan_data["cache_hit"] = cache_hit
     plan_data["file_summaries"] = _build_file_summaries(plan_data, documents)
-    state = "needs_input" if plan.needs_input else "ready"
-    update_workspace_run(run_id, status=state, plan=plan_data)
-    update_session(session_id, status=state)
     message_payload = dict(plan_data)
     if "thinking_text" in locals() and thinking_text.strip():
         message_payload["_thinking_text"] = thinking_text[-30000:]
     message_payload["_workspace_run_id"] = run_id
     add_message(session_id, "assistant", "workspace_report", _format_report(plan_data), message_payload)
-    emit_event(session_id, f"workspace.{state}", {"run_id": run_id, "plan": plan_data})
+    state = "needs_input" if plan.needs_input else "ready"
     if plan.needs_input:
         create_question(
             session_id,
@@ -295,9 +296,16 @@ def _inspect(
     else:
         track_event("task_success.ai_review_workspace")
         if bool(session.get("auto_start")) and not cache_hit:
+            # The workflow only accepts a confirmed-ready Workspace run. The
+            # report is already persisted above, so this does not reintroduce
+            # the UI race that the ordering below prevents.
+            update_workspace_run(run_id, status=state, plan=plan_data)
+            update_session(session_id, status=state)
+            emit_event(session_id, f"workspace.{state}", {"run_id": run_id, "plan": plan_data})
             from .workflow_service import start_session_review
 
             start_session_review(session_id, run_id)
+            return plan_data
         else:
             create_question(
                 session_id,
@@ -309,6 +317,12 @@ def _inspect(
                 ),
                 "确认推荐方案",
             )
+    # Publish `ready` only after the corresponding report and decision branch
+    # are already visible in the snapshot. This prevents the UI from observing
+    # a completed status with a missing assistant message.
+    update_workspace_run(run_id, status=state, plan=plan_data)
+    update_session(session_id, status=state)
+    emit_event(session_id, f"workspace.{state}", {"run_id": run_id, "plan": plan_data})
     return plan_data
 
 
@@ -686,6 +700,7 @@ def _map_explicit_tabular_columns(
     source_column: int | None,
     target_columns: list[tuple[str, int]],
     scopes: set[str],
+    reference_columns: list[int] | None = None,
 ) -> dict[str, list[ReviewUnit]]:
     rows_by_scope: dict[str, dict[int, dict[int, Any]]] = defaultdict(lambda: defaultdict(dict))
     labels: dict[tuple[str, int], str] = {}
@@ -698,6 +713,7 @@ def _map_explicit_tabular_columns(
         rows_by_scope[scope][row][column] = block
         labels[(scope, column)] = str(block.metadata.get("header") or block.label or "")
     result: dict[str, list[ReviewUnit]] = defaultdict(list)
+    selected_reference_columns = list(dict.fromkeys(reference_columns or []))
     for scope, rows in rows_by_scope.items():
         for configured_language, target_column in target_columns:
             language = _select_target_language(configured_language, session.get("target_languages") or [configured_language])
@@ -706,6 +722,15 @@ def _map_explicit_tabular_columns(
                 if target_block is None or not target_block.text.strip():
                     continue
                 source_block = row.get(source_column) if source_column is not None else None
+                references = [
+                    {
+                            "category": labels.get((scope, column), get_column_letter(column + 1)) or get_column_letter(column + 1),
+                        "value": row[column].text,
+                        "pointer": row[column].pointer,
+                    }
+                    for column in selected_reference_columns
+                    if row.get(column) is not None and row[column].text.strip()
+                ]
                 result[language].append(
                     ReviewUnit(
                         id=uuid.uuid4().hex,
@@ -725,8 +750,14 @@ def _map_explicit_tabular_columns(
                             "target_column_index": target_column,
                             "source_pointer": source_block.pointer if source_block else "",
                             "target_pointer": target_block.pointer,
+                            "reference_column_indexes": selected_reference_columns,
+                            "reference_headers": [
+                                labels.get((scope, column), get_column_letter(column + 1)) or get_column_letter(column + 1)
+                                for column in selected_reference_columns
+                            ],
                             "adjusted_by_user": True,
                         },
+                        references=references,
                     )
                 )
     return result
@@ -873,6 +904,17 @@ def _plan_from_agent(
                     continue
                 if agent_declares_no_source:
                     source_column = None
+                raw_reference_columns = mapping.get("reference_column_indexes") or []
+                if not isinstance(raw_reference_columns, list):
+                    raw_reference_columns = []
+                reference_columns: list[int] = []
+                for value in raw_reference_columns:
+                    try:
+                        column = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if column not in {source_column, target_column} and column not in reference_columns:
+                        reference_columns.append(column)
                 scope = str(mapping.get("scope") or "")
                 mapped = _map_explicit_tabular_columns(
                     {"id": session_id, "target_languages": [language]},
@@ -881,6 +923,7 @@ def _plan_from_agent(
                     source_column=source_column,
                     target_columns=[(language, target_column)],
                     scopes={scope} if scope else set(),
+                    reference_columns=reference_columns,
                 )
                 units.extend(mapped.get(language) or [])
                 continue
@@ -916,11 +959,24 @@ def _plan_from_agent(
                 )
         if units:
             targets.append(TargetPlan(language=language, units=units))
+    mapped_attachment_ids = {
+        str(unit.metadata.get("attachment_id") or "")
+        for target in targets for unit in target.units
+        if str(unit.metadata.get("attachment_id") or "") in documents
+    }
+    content_files = list(dict.fromkeys([
+        *[value for value in data.get("content_files", []) if value in documents],
+        *mapped_attachment_ids,
+    ]))
+    reference_files = [
+        value for value in data.get("reference_files", [])
+        if value in documents and value not in mapped_attachment_ids
+    ]
     return ExtractionPlan(
         source_language=str(data.get("source_language") or "auto"),
         targets=targets,
-        content_files=[value for value in data.get("content_files", []) if value in documents],
-        reference_files=[value for value in data.get("reference_files", []) if value in documents],
+        content_files=content_files,
+        reference_files=reference_files,
         relationships=[item for item in data.get("relationships", []) if isinstance(item, dict)],
         assumptions=[str(value) for value in data.get("assumptions", [])],
         warnings=[str(value) for value in data.get("warnings", [])],
@@ -964,7 +1020,9 @@ def _attach_references(plan: ExtractionPlan, documents: dict[str, ReaderDocument
                 score = len(unit_terms & _search_terms(reference["value"]))
                 if score:
                     scored.append((score, reference))
-            unit.references = [item for _, item in sorted(scored, key=lambda pair: pair[0], reverse=True)[:5]]
+            external = [item for _, item in sorted(scored, key=lambda pair: pair[0], reverse=True)[:5]]
+            existing = [item for item in unit.references if str(item.get("value") or "").strip()]
+            unit.references = [*existing, *external][:8]
 
 
 def _get_cached_profile(
@@ -986,7 +1044,7 @@ def _get_cached_profile(
     if not row or not run:
         return None
     profile = loads_json(row["plan_json"], {})
-    if profile.get("profile_version") != 2:
+    if profile.get("profile_version") != 3:
         return None
     attachment_ids = list(documents)
     targets: dict[str, list[ReviewUnit]] = defaultdict(list)
@@ -1008,6 +1066,7 @@ def _get_cached_profile(
                 ),
                 target_columns=[(language, int(mapping["target_column_index"]))],
                 scopes={str(mapping.get("scope") or "")} if mapping.get("scope") else set(),
+                reference_columns=[int(value) for value in mapping.get("reference_column_indexes", []) if isinstance(value, int)],
             )
             targets[language].extend(mapped.get(language) or [])
     except (TypeError, ValueError, KeyError):
@@ -1067,7 +1126,7 @@ def save_confirmed_profile(run_id: str) -> None:
         if not session_row:
             return
         profile_plan = {
-            "profile_version": 2,
+            "profile_version": 3,
             "source_language": raw_plan.get("source_language", "auto"),
             "content_indices": [attachment_indexes[value] for value in raw_plan.get("content_files", []) if value in attachment_indexes],
             "reference_indices": [attachment_indexes[value] for value in raw_plan.get("reference_files", []) if value in attachment_indexes],
@@ -1086,6 +1145,7 @@ def save_confirmed_profile(run_id: str) -> None:
                     str(metadata.get("scope") or ""),
                     metadata.get("source_column_index"),
                     metadata.get("target_column_index"),
+                    tuple(metadata.get("reference_column_indexes") or []),
                 )
                 if key in seen_mappings:
                     continue
@@ -1097,6 +1157,7 @@ def save_confirmed_profile(run_id: str) -> None:
                         "scope": key[2],
                         "source_column_index": key[3],
                         "target_column_index": key[4],
+                        "reference_column_indexes": list(key[5]),
                     }
                 )
         if not profile_plan["mappings"]:
@@ -1282,6 +1343,7 @@ def _format_report(plan: dict[str, Any]) -> str:
                 f"  {mapping.get('language') or '自动识别'} · {mapping.get('count') or 0} 条"
                 f"｜原文：{mapping.get('source_location') or '无源文'}"
                 f"｜译文：{mapping.get('target_location') or '未识别'}"
+                f"｜参考：{mapping.get('reference_locations') or '无'}"
             )
             for sample_index, sample in enumerate(mapping.get("samples") or [], 1):
                 source = str(sample.get("source") or "")
@@ -1351,10 +1413,20 @@ def _build_file_summaries(
                     "count": len(units),
                     "source_location": _compact_locations(source_pointers, source_header),
                     "target_location": _compact_locations(target_pointers, target_header),
+                    "reference_locations": "、".join(
+                        str(value) for value in next(
+                            (
+                                unit.get("metadata", {}).get("reference_headers") or []
+                                for unit in units
+                                if unit.get("metadata", {}).get("reference_headers")
+                            ),
+                            [],
+                        )
+                    ),
                     "samples": samples,
                 }
             )
-        role = "reference" if attachment_id in reference_ids or document.role_hint == "reference" else "content"
+        role = "reference" if (attachment_id in reference_ids or document.role_hint == "reference") and not mappings else "content"
         summaries.append(
             {
                 "attachment_id": attachment_id,

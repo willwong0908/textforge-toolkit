@@ -42,11 +42,12 @@ def _text(value: Any) -> str:
 
 
 def _role_hint(filename: str, labels: Iterable[str]) -> str:
-    combined = " ".join([filename, *labels]).lower()
+    del labels
+    combined = Path(filename).stem.lower()
     reference_markers = (
-        "glossary", "term", "style", "guide", "reference", "context", "说明", "术语", "规范", "参考",
+        "glossary", "termbase", "styleguide", "reference", "术语表", "术语库", "风格指南", "参考资料",
     )
-    return "reference" if any(marker in combined for marker in reference_markers) else "content"
+    return "reference" if any(marker in combined for marker in reference_markers) else "candidate"
 
 
 class BaseReader(ABC):

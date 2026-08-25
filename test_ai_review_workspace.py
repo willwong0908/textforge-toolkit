@@ -374,6 +374,60 @@ class WorkspaceSessionTests(unittest.TestCase):
         self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "Hello")
         self.assertEqual(plan["targets"][0]["units"][0]["target_text"], "你好")
 
+    def test_workspace_receives_row_aligned_evidence_and_keeps_reference_columns(self) -> None:
+        path = Path(self.temp.name) / "script_EN.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Sheet1"
+        sheet.append(["speaker", "画面内容", "en", "运镜（参考）"])
+        sheet.append(["Host", "欢迎来到 FireTV", "Welcome to FireTV", "推进镜头"])
+        sheet.append(["Dev Team", "BTWF，我们提供开发者支持", "We provide developer support", "切到产品"])
+        workbook.save(path)
+        document = build_default_registry().read(path)
+        manifest = document.to_manifest(sample_limit=3)
+        self.assertEqual(manifest["role_hint"], "candidate")
+        row_cells = manifest["table_evidence"][0]["row_examples"][0]["cells"]
+        self.assertEqual({item["header"] for item in row_cells}, {"speaker", "画面内容", "en", "运镜（参考）"})
+
+        session = session_store.create_session(source_language="auto", target_languages=["auto"])
+        attachment = session_store.add_attachment(session["id"], path.name, path.read_bytes())
+        prompts: list[str] = []
+
+        def workspace_plan(messages: list[dict[str, str]], on_delta=None) -> str:
+            prompt = messages[-1]["content"]
+            prompts.append(prompt)
+            manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
+            evidence = manifests[attachment["id"]]["table_evidence"][0]
+            self.assertEqual(evidence["row_examples"][0]["cells"][0]["text"], "Host")
+            response = json.dumps(
+                {
+                    "content_files": [attachment["id"]], "reference_files": [], "source_language": "中文",
+                    "targets": [{"language": "en", "mappings": [{
+                        "attachment_id": attachment["id"], "scope": "Sheet1",
+                        "source_column_index": 1, "target_column_index": 2,
+                        "reference_column_indexes": [0],
+                    }]}],
+                    "relationships": [], "assumptions": [], "warnings": [], "confidence": 0.97,
+                    "needs_input": False, "question": "",
+                },
+                ensure_ascii=False,
+            )
+            return response
+
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+            side_effect=workspace_plan,
+        ):
+            plan = inspect_workspace_sync(session["id"])
+        self.assertTrue(prompts)
+        units = plan["targets"][0]["units"]
+        self.assertEqual(units[0]["references"], [{"category": "speaker", "value": "Host", "pointer": "sheet:Sheet1/cell:A2"}])
+        self.assertEqual(plan["file_summaries"][0]["role"], "content")
+        self.assertEqual(plan["file_summaries"][0]["mappings"][0]["reference_locations"], "speaker")
+
     def test_delete_session_removes_private_attachments(self) -> None:
         session = session_store.create_session()
         attachment = session_store.add_attachment(session["id"], "sample.txt", b"hello")

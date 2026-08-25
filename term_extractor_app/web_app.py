@@ -2411,25 +2411,25 @@ INDEX_HTML = """<!doctype html>
               <h3>非译元素阶段</h3>
               <p></p>
             </div>
-            <label>单次处理长度<input id="nontransLimit" type="number" min="200" value="20000" /></label>
-            <label>思考强度（已开启）<select id="nontransReasoningEffort"><option value="low">低 · 更快</option><option value="medium">中 · 平衡</option><option value="high">高 · 更充分</option></select></label>
+            <label>单次处理长度<input id="nontransLimit" type="number" min="200" value="5000" /></label>
+            <label>思考强度（已开启）<select id="nontransReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
           </section>
           <section class="card compact-card">
             <div class="card-title">
               <h3>术语召回阶段</h3>
               <p></p>
             </div>
-            <label>单次处理长度<input id="recallLimit" type="number" min="200" value="20000" /></label>
-            <label>思考强度（已开启）<select id="recallReasoningEffort"><option value="low">低 · 更快</option><option value="medium">中 · 平衡</option><option value="high">高 · 更充分</option></select></label>
+            <label>单次处理长度<input id="recallLimit" type="number" min="200" value="5000" /></label>
+            <label>思考强度（已开启）<select id="recallReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
           </section>
           <section class="card compact-card">
             <div class="card-title">
               <h3>术语校验阶段</h3>
               <p></p>
             </div>
-            <label>单次处理长度<input id="reviewLimit" type="number" min="200" value="20000" /></label>
+            <label>单次处理长度<input id="reviewLimit" type="number" min="200" value="5000" /></label>
             <label>上下文长度<input id="reviewContextLimit" type="number" min="50" max="2000" value="220" /></label>
-            <label>思考强度（已开启）<select id="termReviewReasoningEffort"><option value="low">低 · 更快</option><option value="medium">中 · 平衡</option><option value="high">高 · 更充分</option></select></label>
+            <label>思考强度（已开启）<select id="termReviewReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
           </section>
         </div>
 
@@ -3024,8 +3024,8 @@ INDEX_HTML = """<!doctype html>
             <div class="grid two">
               <label>思考强度<select id="reviewReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
               <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
-              <label>单包字符预算<input id="reviewAiLimit" type="number" min="1000" value="20000" /></label>
-              <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="80" /></label>
+              <label>单包正文预算<input id="reviewAiLimit" type="number" min="200" value="1500" /></label>
+              <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="20" /></label>
             </div>
             <div class="actions">
               <button id="saveReviewAgentSettingsButton" class="primary" type="button">保存设置</button>
@@ -6376,10 +6376,10 @@ function settingsPayload() {
     disable_system_proxy: $("disableSystemProxy").checked,
     extraction_mode: $("extractionMode").value,
     source_language: $("sourceLanguage").value,
-    nontrans_chunk_char_limit: Number($("nontransLimit").value || 20000),
+    nontrans_chunk_char_limit: Number($("nontransLimit").value || 5000),
     nontrans_placeholder_format: $("nontransPlaceholderFormat").value || "<{n}>",
-    term_recall_batch_char_limit: Number($("recallLimit").value || 20000),
-    term_review_batch_char_limit: Number($("reviewLimit").value || 20000),
+    term_recall_batch_char_limit: Number($("recallLimit").value || 5000),
+    term_review_batch_char_limit: Number($("reviewLimit").value || 5000),
     term_review_max_context_chars: Number($("reviewContextLimit").value || 220),
     nontrans_reasoning_effort: $("nontransReasoningEffort").value || "low",
     term_recall_reasoning_effort: $("recallReasoningEffort").value || "low",
@@ -8286,9 +8286,17 @@ function renderReviewMessages(messages, questions) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "review-message-file";
-        button.title = attachment.original_path ? "打开原始文件" : "此文件由拖拽/网页上传，未记录原始路径";
-        button.textContent = `▤ ${attachment.original_filename || "文件"}`;
-        button.addEventListener("click", () => openReviewConversationAttachmentOriginal(attachment.id).catch(showReviewConversationError));
+        const canOpenOriginal = Boolean(attachment.original_path);
+        button.title = canOpenOriginal ? "打开原始文件" : "关联原始文件后可直接打开";
+        button.textContent = canOpenOriginal
+          ? `▤ ${attachment.original_filename || "文件"}`
+          : `▤ ${attachment.original_filename || "文件"} · 关联原文件`;
+        button.classList.toggle("needs-relink", !canOpenOriginal);
+        button.addEventListener("click", () => (
+          canOpenOriginal
+            ? openReviewConversationAttachmentOriginal(attachment.id)
+            : relinkReviewConversationAttachmentOriginal(attachment.id)
+        ).catch(showReviewConversationError));
         files.appendChild(button);
       });
       item.appendChild(files);
@@ -8541,6 +8549,19 @@ async function openReviewConversationAttachmentOriginal(attachmentId) {
     body: "{}",
   });
   $("reviewConversationHint").textContent = "已打开原始文件";
+}
+
+async function relinkReviewConversationAttachmentOriginal(attachmentId) {
+  const data = await api("/api/dialog/select-review-files");
+  const paths = Array.isArray(data.file_paths) ? data.file_paths.filter(Boolean) : [];
+  if (!paths.length) return;
+  if (paths.length > 1) throw new Error("一次只能选择一个与该附件内容完全一致的原始文件");
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachmentId)}/relink-original`, {
+    method: "POST",
+    body: JSON.stringify({ file_path: paths[0] }),
+  });
+  await openReviewConversationAttachmentOriginal(attachmentId);
+  await refreshCurrentReviewConversation();
 }
 
 async function sendReviewConversationMessage() {
@@ -9001,9 +9022,9 @@ async function loadSettings() {
   const recall = data.term_recall_stage_settings || {};
   const review = data.term_review_stage_settings || {};
   const aiReview = data.ai_review_stage_settings || {};
-  $("nontransLimit").value = Number(nontrans.chunk_char_limit || 0) <= 6000 ? 20000 : nontrans.chunk_char_limit;
-  $("recallLimit").value = Number(recall.batch_request_char_limit || 0) <= 6000 ? 20000 : recall.batch_request_char_limit;
-  $("reviewLimit").value = Number(review.batch_request_char_limit || 0) <= 6000 ? 20000 : review.batch_request_char_limit;
+  $("nontransLimit").value = Number(nontrans.chunk_char_limit || 0) > 0 ? nontrans.chunk_char_limit : 5000;
+  $("recallLimit").value = Number(recall.batch_request_char_limit || 0) > 0 ? recall.batch_request_char_limit : 5000;
+  $("reviewLimit").value = Number(review.batch_request_char_limit || 0) > 0 ? review.batch_request_char_limit : 5000;
   $("reviewContextLimit").value = review.max_context_chars || 220;
   const normalizeReasoningEffort = (value) => ["low", "medium", "high"].includes(value) ? value : "low";
   $("nontransReasoningEffort").value = normalizeReasoningEffort(nontrans.reasoning_effort);
@@ -9011,9 +9032,9 @@ async function loadSettings() {
   $("termReviewReasoningEffort").value = normalizeReasoningEffort(review.reasoning_effort);
   if ($("reviewAiLimit")) {
     const configuredLimit = Number(aiReview.batch_request_char_limit || 0);
-    $("reviewAiLimit").value = configuredLimit <= 6000 ? 20000 : configuredLimit;
+    $("reviewAiLimit").value = configuredLimit > 0 ? configuredLimit : 1500;
   }
-  $("reviewMaxItems").value = aiReview.max_items_per_request || 80;
+  $("reviewMaxItems").value = aiReview.max_items_per_request || 20;
   $("reviewReasoningEffort").value = normalizeReasoningEffort(aiReview.reasoning_effort === "max" ? "high" : aiReview.reasoning_effort);
   $("reviewDebugPayloadLogging").checked = Boolean(aiReview.debug_payload_logging);
   $("builtinRegex").checked = nontrans.builtin_regex_enabled !== false;
@@ -9089,8 +9110,8 @@ async function saveSettings() {
 
 function reviewSettingsPayload() {
   return {
-    ai_review_batch_char_limit: Number($("reviewAiLimit").value || 20000),
-    ai_review_max_items_per_request: Number($("reviewMaxItems").value || 80),
+    ai_review_batch_char_limit: Number($("reviewAiLimit").value || 1500),
+    ai_review_max_items_per_request: Number($("reviewMaxItems").value || 20),
     ai_review_debug_payload_logging: $("reviewDebugPayloadLogging").checked,
     ai_review_reasoning_effort: $("reviewReasoningEffort").value || "low",
   };
