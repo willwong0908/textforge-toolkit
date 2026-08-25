@@ -4,12 +4,14 @@ import hashlib
 import json
 import re
 import threading
+import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from .database import dumps_json, get_connection, loads_json, utc_now
+from .excel_mapping_service import get_excel_mapping_preset
 from .readers import ReaderDependencyError, ReaderDocument, ReaderError, build_default_registry
 from .session_store import (
     add_message,
@@ -29,6 +31,7 @@ from ..telemetry import track_event
 
 WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent。你只负责理解文件结构和文件关系，不执行审校。
 根据结构清单判断正文、参考资料、原文位置和每种目标语言的译文位置。优先采用已有稳定指针，不要编造不存在的内容。
+如果用户指定源语言为 none，所有映射都必须把 source_column_index/source_pointer 设为空，不得补造原文。
 只有完全无法形成可执行提取方案时 needs_input 才能为 true。只返回严格 JSON，不要输出 Markdown。"""
 
 WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单，并返回：
@@ -52,27 +55,38 @@ WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单�
 
 
 def submit_workspace_inspection(
-    session_id: str, direct_text: str = "", *, adjustment_text: str = ""
+    session_id: str,
+    direct_text: str = "",
+    *,
+    adjustment_text: str = "",
+    attachment_ids: list[str] | None = None,
+    record_user_message: bool = True,
 ) -> str:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
         raise ValueError("审校会话不存在")
-    if direct_text.strip():
+    if direct_text.strip() and record_user_message:
         add_message(session_id, "user", "message", direct_text.strip())
-    if not direct_text.strip() and not snapshot["attachments"]:
+    effective_attachment_ids = (
+        [str(value) for value in attachment_ids]
+        if attachment_ids is not None
+        else [str(item["id"]) for item in snapshot["attachments"]]
+    )
+    if not direct_text.strip() and not effective_attachment_ids:
         raise ValueError("请添加文件或输入待审校文本")
     update_session(session_id, status="inspecting", error_message="")
     settings = get_shared_ai_settings()
-    signature = _input_signature(snapshot, direct_text, adjustment_text)
+    signature = _input_signature(snapshot, direct_text, adjustment_text, effective_attachment_ids)
     run = create_workspace_run(
         session_id,
         model=str(settings.get("selected_model") or ""),
         input_signature=signature,
+        attachment_ids=effective_attachment_ids,
     )
     emit_event(session_id, "workspace.started", {"run_id": run["id"]})
     thread = threading.Thread(
         target=_run_inspection,
-        args=(session_id, run["id"], direct_text, adjustment_text),
+        args=(session_id, run["id"], direct_text, adjustment_text, effective_attachment_ids),
         daemon=True,
     )
     thread.start()
@@ -80,23 +94,39 @@ def submit_workspace_inspection(
 
 
 def inspect_workspace_sync(
-    session_id: str, direct_text: str = "", *, adjustment_text: str = ""
+    session_id: str,
+    direct_text: str = "",
+    *,
+    adjustment_text: str = "",
+    attachment_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
         raise ValueError("审校会话不存在")
+    effective_attachment_ids = (
+        [str(value) for value in attachment_ids]
+        if attachment_ids is not None
+        else [str(item["id"]) for item in snapshot["attachments"]]
+    )
     settings = get_shared_ai_settings()
     run = create_workspace_run(
         session_id,
         model=str(settings.get("selected_model") or ""),
-        input_signature=_input_signature(snapshot, direct_text, adjustment_text),
+        input_signature=_input_signature(snapshot, direct_text, adjustment_text, effective_attachment_ids),
+        attachment_ids=effective_attachment_ids,
     )
-    return _inspect(session_id, run["id"], direct_text, adjustment_text)
+    return _inspect(session_id, run["id"], direct_text, adjustment_text, effective_attachment_ids)
 
 
-def _run_inspection(session_id: str, run_id: str, direct_text: str, adjustment_text: str) -> None:
+def _run_inspection(
+    session_id: str,
+    run_id: str,
+    direct_text: str,
+    adjustment_text: str,
+    attachment_ids: list[str],
+) -> None:
     try:
-        _inspect(session_id, run_id, direct_text, adjustment_text)
+        _inspect(session_id, run_id, direct_text, adjustment_text, attachment_ids)
     except Exception as exc:
         message = str(exc) or repr(exc)
         update_workspace_run(run_id, status="failed", error=message)
@@ -107,7 +137,11 @@ def _run_inspection(session_id: str, run_id: str, direct_text: str, adjustment_t
 
 
 def _inspect(
-    session_id: str, run_id: str, direct_text: str, adjustment_text: str = ""
+    session_id: str,
+    run_id: str,
+    direct_text: str,
+    adjustment_text: str = "",
+    attachment_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
@@ -116,7 +150,13 @@ def _inspect(
     documents: dict[str, ReaderDocument] = {}
     registry = build_default_registry()
     dependency_errors: list[dict[str, str]] = []
-    for attachment in snapshot["attachments"]:
+    allowed_attachment_ids = set(attachment_ids) if attachment_ids is not None else None
+    selected_attachments = [
+        attachment for attachment in snapshot["attachments"]
+        if allowed_attachment_ids is None or str(attachment["id"]) in allowed_attachment_ids
+    ]
+    attachment_settings = {str(item["id"]): item for item in selected_attachments}
+    for attachment in selected_attachments:
         attachment_id = str(attachment["id"])
         try:
             document = registry.read(Path(attachment["stored_path"]), attachment["original_filename"])
@@ -183,15 +223,31 @@ def _inspect(
     )
     candidate = _apply_natural_language_adjustment(session, documents, adjustment) if adjustment else None
     candidate = candidate or _build_deterministic_plan(session, documents, direct_text)
+    preset_plan = (
+        _build_preset_plan(session, documents, attachment_settings)
+        if not adjustment and not direct_text.strip()
+        else None
+    )
+    cached_plan = (
+        _get_cached_profile(run_id, documents, session)
+        if not adjustment and not direct_text.strip() and not xliff_local_only and preset_plan is None
+        else None
+    )
+    cache_hit = cached_plan is not None
     if xliff_local_only:
         plan = candidate
         plan.assumptions.append("XLIFF 自带原文、译文及语言结构，本次使用本地确定性读取。")
+    elif preset_plan is not None:
+        plan = preset_plan
+    elif cached_plan is not None:
+        plan = cached_plan
     else:
         refined = _refine_with_model(
             session,
             documents,
             direct_text=direct_text,
             adjustment_text=adjustment,
+            run_id=run_id,
         )
         if refined is not None:
             plan = refined
@@ -209,6 +265,7 @@ def _inspect(
                 plan.warnings.append("下方内容只是 Reader 生成的本地候选映射，尚未经过 Workspace Agent 确认。")
     _attach_references(plan, documents)
     plan_data = plan.to_dict()
+    plan_data["cache_hit"] = cache_hit
     plan_data["file_summaries"] = _build_file_summaries(plan_data, documents)
     state = "needs_input" if plan.needs_input else "ready"
     update_workspace_run(run_id, status=state, plan=plan_data)
@@ -220,7 +277,7 @@ def _inspect(
         track_event("task_question.ai_review_workspace")
     else:
         track_event("task_success.ai_review_workspace")
-        if bool(session.get("auto_start")):
+        if bool(session.get("auto_start")) and not cache_hit:
             from .workflow_service import start_session_review
 
             start_session_review(session_id, run_id)
@@ -228,7 +285,11 @@ def _inspect(
             create_question(
                 session_id,
                 run_id,
-                "识别方案已准备好，请确认后开始审校；如有需要，也可以输入补充说明后重新识别。",
+                (
+                    "已读取完全匹配的本地结构缓存，请确认后开始审校；选择其他将重新交给 Workspace Agent 识别。"
+                    if cache_hit
+                    else "识别方案已准备好，请确认后开始审校；如有需要，也可以输入补充说明后重新识别。"
+                ),
                 "确认推荐方案",
             )
     return plan_data
@@ -329,6 +390,76 @@ def _build_deterministic_plan(
         confidence=confidence,
         needs_input=total_units == 0,
         question="无法识别待审校译文，请说明文件关系或正文位置。" if total_units == 0 else "",
+    )
+
+
+def _build_preset_plan(
+    session: dict[str, Any],
+    documents: dict[str, ReaderDocument],
+    attachment_settings: dict[str, dict[str, Any]],
+) -> ExtractionPlan | None:
+    content_ids = [attachment_id for attachment_id, doc in documents.items() if doc.role_hint != "reference"]
+    reference_ids = [attachment_id for attachment_id, doc in documents.items() if doc.role_hint == "reference"]
+    if not content_ids:
+        return None
+    targets: dict[str, list[ReviewUnit]] = defaultdict(list)
+    preset_names: list[str] = []
+    preset_source_languages: list[str] = []
+    for attachment_id in content_ids:
+        document = documents[attachment_id]
+        if document.file_type == "xliff":
+            local = _build_deterministic_plan(session, {attachment_id: document}, "")
+            for target in local.targets:
+                targets[target.language].extend(target.units)
+            continue
+        attachment = attachment_settings.get(attachment_id) or {}
+        if attachment.get("mapping_mode") != "preset" or document.file_type != "excel":
+            return None
+        try:
+            preset = get_excel_mapping_preset(str(attachment.get("mapping_preset_id") or ""))
+        except ValueError:
+            return None
+        mapping = dict(preset.get("mapping") or {})
+        preset_names.append(str(preset.get("name") or "未命名模板"))
+        if str(mapping.get("source_language") or "").strip():
+            preset_source_languages.append(str(mapping["source_language"]).strip())
+        sheet_names = [str(item.get("name") or "") for item in document.structure.get("sheets", [])]
+        configured_language = str(mapping.get("target_language") or "auto")
+        for sheet_index, sheet_mapping in enumerate(mapping.get("sheets") or []):
+            scope = sheet_names[sheet_index] if sheet_index < len(sheet_names) else str(sheet_mapping.get("sheet_name") or "")
+            for column_mapping in sheet_mapping.get("mappings") or []:
+                mapped = _map_explicit_tabular_columns(
+                    session,
+                    attachment_id,
+                    document,
+                    source_column=(
+                        None
+                        if str(session.get("source_language") or "").lower() == "none"
+                        else int(column_mapping["source_column"])
+                    ),
+                    target_columns=[(configured_language, int(column_mapping["target_column"]))],
+                    scopes={scope} if scope else set(),
+                )
+                for language, units in mapped.items():
+                    for unit in units:
+                        unit.metadata["mapping_preset_id"] = preset["id"]
+                    targets[language].extend(units)
+    if not targets:
+        return None
+    selected_source = str(session.get("source_language") or "auto")
+    if selected_source == "auto" and preset_source_languages:
+        selected_source = preset_source_languages[0]
+    return ExtractionPlan(
+        source_language=selected_source,
+        targets=[TargetPlan(language=language, units=units) for language, units in targets.items()],
+        content_files=content_ids,
+        reference_files=reference_ids,
+        relationships=[
+            {"from": reference_id, "to": content_id, "kind": "reference"}
+            for reference_id in reference_ids for content_id in content_ids
+        ],
+        assumptions=["已按用户选择的导入映射模板读取：" + "、".join(preset_names)],
+        confidence=1.0,
     )
 
 
@@ -537,6 +668,8 @@ def _map_explicit_tabular_columns(
                             "row": row_number,
                             "source_header": labels.get((scope, source_column), "") if source_column is not None else "",
                             "target_header": labels.get((scope, target_column), ""),
+                            "source_column_index": source_column,
+                            "target_column_index": target_column,
                             "source_pointer": source_block.pointer if source_block else "",
                             "target_pointer": target_block.pointer,
                             "adjusted_by_user": True,
@@ -552,6 +685,7 @@ def _refine_with_model(
     *,
     direct_text: str = "",
     adjustment_text: str = "",
+    run_id: str = "",
 ) -> ExtractionPlan | None:
     settings = get_shared_ai_settings()
     if not str(settings.get("api_key") or "").strip() or not str(settings.get("selected_model") or "").strip():
@@ -585,11 +719,47 @@ def _refine_with_model(
         manifest_json=json.dumps(manifests, ensure_ascii=False),
     )
     try:
+        pending_chunks: list[str] = []
+        received_chars = 0
+        last_emit = time.monotonic()
+
+        def emit_delta(delta: str) -> None:
+            nonlocal received_chars, last_emit
+            value = str(delta or "")
+            if value:
+                pending_chunks.append(value)
+                received_chars += len(value)
+            now = time.monotonic()
+            if pending_chunks and (sum(map(len, pending_chunks)) >= 64 or now - last_emit >= 0.12):
+                emit_event(
+                    session["id"],
+                    "workspace.delta",
+                    {"run_id": run_id, "delta": "".join(pending_chunks), "received_chars": received_chars},
+                )
+                pending_chunks.clear()
+                last_emit = now
+
+        emit_event(session["id"], "workspace.output_started", {"run_id": run_id})
         raw = workspace_chat(
-            [{"role": "system", "content": WORKSPACE_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
+            [{"role": "system", "content": WORKSPACE_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+            on_delta=emit_delta,
         )
+        if pending_chunks:
+            emit_event(
+                session["id"],
+                "workspace.delta",
+                {"run_id": run_id, "delta": "".join(pending_chunks), "received_chars": received_chars},
+            )
         parsed = _parse_json(raw)
-        return _plan_from_agent(session["id"], parsed, analysis_documents)
+        plan = _plan_from_agent(session["id"], parsed, analysis_documents)
+        if str(session.get("source_language") or "").lower() == "none":
+            plan.source_language = "none"
+            for target in plan.targets:
+                for unit in target.units:
+                    unit.source_text = ""
+                    unit.metadata["source_pointer"] = ""
+                    unit.metadata["source_column_index"] = None
+        return plan
     except (SharedProviderError, ValueError, json.JSONDecodeError):
         return None
 
@@ -685,45 +855,75 @@ def _attach_references(plan: ExtractionPlan, documents: dict[str, ReaderDocument
             unit.references = [item for _, item in sorted(scored, key=lambda pair: pair[0], reverse=True)[:5]]
 
 
-def _get_cached_profile(run_id: str, documents: dict[str, ReaderDocument]) -> ExtractionPlan | None:
-    if not documents:
+def _get_cached_profile(
+    run_id: str, documents: dict[str, ReaderDocument], session: dict[str, Any]
+) -> ExtractionPlan | None:
+    if not documents or any(
+        document.file_type not in {"excel", "csv", "tsv"}
+        for document in documents.values() if document.role_hint != "reference"
+    ):
         return None
-    signature = _structure_signature(documents)
+    signature = _structure_signature(
+        documents,
+        str(session.get("source_language") or "auto"),
+        list(session.get("target_languages") or ["auto"]),
+    )
     with get_connection() as conn:
         row = conn.execute("SELECT plan_json FROM extraction_profiles WHERE signature = ?", (signature,)).fetchone()
         run = conn.execute("SELECT session_id FROM workspace_runs WHERE id = ?", (run_id,)).fetchone()
     if not row or not run:
         return None
     profile = loads_json(row["plan_json"], {})
-    attachment_ids = list(documents)
-    data = {
-        "source_language": profile.get("source_language", "auto"),
-        "content_files": [attachment_ids[index] for index in profile.get("content_indices", []) if 0 <= index < len(attachment_ids)],
-        "reference_files": [attachment_ids[index] for index in profile.get("reference_indices", []) if 0 <= index < len(attachment_ids)],
-        "relationships": [],
-        "assumptions": ["已复用本地确认过的文件结构。"],
-        "warnings": [],
-        "confidence": 0.98,
-        "needs_input": False,
-        "targets": [],
-    }
-    for target in profile.get("targets", []):
-        mappings = []
-        for mapping in target.get("mappings", []):
-            index = int(mapping.get("attachment_index", -1))
-            if 0 <= index < len(attachment_ids):
-                mappings.append(
-                    {
-                        "attachment_id": attachment_ids[index],
-                        "target_pointer": mapping.get("target_pointer", ""),
-                        "source_pointer": mapping.get("source_pointer", ""),
-                    }
-                )
-        data["targets"].append({"language": target.get("language", "auto"), "mappings": mappings})
-    try:
-        return _plan_from_agent(str(run["session_id"]), data, documents)
-    except (TypeError, ValueError):
+    if profile.get("profile_version") != 2:
         return None
+    attachment_ids = list(documents)
+    targets: dict[str, list[ReviewUnit]] = defaultdict(list)
+    try:
+        for mapping in profile.get("mappings", []):
+            attachment_index = int(mapping.get("attachment_index", -1))
+            if attachment_index < 0 or attachment_index >= len(attachment_ids):
+                return None
+            attachment_id = attachment_ids[attachment_index]
+            language = str(mapping.get("language") or "auto")
+            mapped = _map_explicit_tabular_columns(
+                {"id": str(run["session_id"]), "target_languages": [language]},
+                attachment_id,
+                documents[attachment_id],
+                source_column=(
+                    int(mapping["source_column_index"])
+                    if mapping.get("source_column_index") is not None
+                    else None
+                ),
+                target_columns=[(language, int(mapping["target_column_index"]))],
+                scopes={str(mapping.get("scope") or "")} if mapping.get("scope") else set(),
+            )
+            targets[language].extend(mapped.get(language) or [])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if not targets:
+        return None
+    content_files = [
+        attachment_ids[index]
+        for index in profile.get("content_indices", [])
+        if isinstance(index, int) and 0 <= index < len(attachment_ids)
+    ]
+    reference_files = [
+        attachment_ids[index]
+        for index in profile.get("reference_indices", [])
+        if isinstance(index, int) and 0 <= index < len(attachment_ids)
+    ]
+    return ExtractionPlan(
+        source_language=str(profile.get("source_language") or session.get("source_language") or "auto"),
+        targets=[TargetPlan(language=language, units=units) for language, units in targets.items()],
+        content_files=content_files,
+        reference_files=reference_files,
+        relationships=[
+            {"from": reference_id, "to": content_id, "kind": "reference"}
+            for reference_id in reference_files for content_id in content_files
+        ],
+        assumptions=["语言选择和表头结构完全一致，已读取确认过的本地结构缓存。"],
+        confidence=0.99,
+    )
 
 
 def save_confirmed_profile(run_id: str) -> None:
@@ -731,36 +931,73 @@ def save_confirmed_profile(run_id: str) -> None:
         run = conn.execute("SELECT * FROM workspace_runs WHERE id = ?", (run_id,)).fetchone()
         if not run:
             raise ValueError("Workspace 运行不存在")
+        attachment_ids = loads_json(run["attachment_ids_json"], []) if "attachment_ids_json" in run.keys() else []
+        if not attachment_ids:
+            return
+        placeholders = ",".join("?" for _ in attachment_ids)
         attachments = conn.execute(
-            "SELECT id, manifest_json FROM review_attachments WHERE session_id = ? AND status = 'ready' ORDER BY created_at, rowid",
-            (run["session_id"],),
+            f"SELECT id, manifest_json FROM review_attachments WHERE session_id = ? AND status = 'ready' "
+            f"AND id IN ({placeholders}) ORDER BY created_at, rowid",
+            (run["session_id"], *attachment_ids),
         ).fetchall()
         manifests = [loads_json(row["manifest_json"], {}) for row in attachments]
+        if not manifests or any(
+            item.get("file_type") not in {"excel", "csv", "tsv"}
+            for item in manifests if item.get("role_hint") != "reference"
+        ):
+            return
         attachment_indexes = {str(row["id"]): index for index, row in enumerate(attachments)}
         raw_plan = loads_json(run["plan_json"], {})
+        session_row = conn.execute(
+            "SELECT source_language, target_languages_json FROM review_sessions WHERE id = ?",
+            (run["session_id"],),
+        ).fetchone()
+        if not session_row:
+            return
         profile_plan = {
-            "profile_version": 1,
+            "profile_version": 2,
             "source_language": raw_plan.get("source_language", "auto"),
             "content_indices": [attachment_indexes[value] for value in raw_plan.get("content_files", []) if value in attachment_indexes],
             "reference_indices": [attachment_indexes[value] for value in raw_plan.get("reference_files", []) if value in attachment_indexes],
-            "targets": [],
+            "mappings": [],
         }
+        seen_mappings: set[tuple[Any, ...]] = set()
         for target in raw_plan.get("targets", []):
-            mappings = []
             for unit in target.get("units", []):
                 metadata = dict(unit.get("metadata") or {})
                 attachment_id = str(metadata.get("attachment_id") or "")
-                if attachment_id not in attachment_indexes:
+                if attachment_id not in attachment_indexes or metadata.get("target_column_index") is None:
                     continue
-                mappings.append(
+                key = (
+                    attachment_indexes[attachment_id],
+                    str(target.get("language") or "auto"),
+                    str(metadata.get("scope") or ""),
+                    metadata.get("source_column_index"),
+                    metadata.get("target_column_index"),
+                )
+                if key in seen_mappings:
+                    continue
+                seen_mappings.add(key)
+                profile_plan["mappings"].append(
                     {
-                        "attachment_index": attachment_indexes[attachment_id],
-                        "target_pointer": metadata.get("target_pointer") or unit.get("pointer") or "",
-                        "source_pointer": metadata.get("source_pointer") or "",
+                        "attachment_index": key[0],
+                        "language": key[1],
+                        "scope": key[2],
+                        "source_column_index": key[3],
+                        "target_column_index": key[4],
                     }
                 )
-            profile_plan["targets"].append({"language": target.get("language", "auto"), "mappings": mappings})
-        signature = hashlib.sha256(dumps_json([_manifest_shape(item) for item in manifests]).encode("utf-8")).hexdigest()
+        if not profile_plan["mappings"]:
+            return
+        signature = hashlib.sha256(
+            dumps_json(
+                {
+                    "source_language": str(session_row["source_language"] or "auto"),
+                    "target_languages": loads_json(session_row["target_languages_json"], ["auto"]),
+                    "documents": [_manifest_shape(item) for item in manifests],
+                }
+            ).encode("utf-8")
+        ).hexdigest()
         now = utc_now()
         conn.execute(
             """
@@ -775,9 +1012,18 @@ def save_confirmed_profile(run_id: str) -> None:
         )
 
 
-def _input_signature(snapshot: dict[str, Any], direct_text: str, adjustment_text: str = "") -> str:
+def _input_signature(
+    snapshot: dict[str, Any],
+    direct_text: str,
+    adjustment_text: str = "",
+    attachment_ids: list[str] | None = None,
+) -> str:
+    allowed = set(attachment_ids) if attachment_ids is not None else None
     raw = {
-        "attachments": [item["file_hash"] for item in snapshot["attachments"]],
+        "attachments": [
+            item["file_hash"] for item in snapshot["attachments"]
+            if allowed is None or str(item["id"]) in allowed
+        ],
         "text": hashlib.sha256(direct_text.encode("utf-8")).hexdigest() if direct_text else "",
         "adjustment": hashlib.sha256(adjustment_text.encode("utf-8")).hexdigest() if adjustment_text else "",
         "source": snapshot["session"]["source_language"],
@@ -786,17 +1032,45 @@ def _input_signature(snapshot: dict[str, Any], direct_text: str, adjustment_text
     return hashlib.sha256(dumps_json(raw).encode("utf-8")).hexdigest()
 
 
-def _structure_signature(documents: dict[str, ReaderDocument]) -> str:
+def _structure_signature(
+    documents: dict[str, ReaderDocument], source_language: str, target_languages: list[str]
+) -> str:
     shapes = [_manifest_shape(document.to_manifest(sample_limit=0)) for document in documents.values()]
-    return hashlib.sha256(dumps_json(shapes).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        dumps_json(
+            {
+                "source_language": source_language,
+                "target_languages": target_languages,
+                "documents": shapes,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _manifest_shape(manifest: dict[str, Any]) -> dict[str, Any]:
+    structure = dict(manifest.get("structure") or {})
+    if manifest.get("file_type") == "excel":
+        header_structure = {
+            "sheets": [
+                {
+                    "name": sheet.get("name"),
+                    "columns": [
+                        {"index": column.get("index"), "header": column.get("header")}
+                        for column in sheet.get("columns", [])
+                    ],
+                }
+                for sheet in structure.get("sheets", [])
+            ]
+        }
+    elif manifest.get("file_type") in {"csv", "tsv"}:
+        header_structure = {"headers": list(structure.get("headers") or [])}
+    else:
+        header_structure = structure
     return {
         "reader_name": manifest.get("reader_name"),
         "file_type": manifest.get("file_type"),
         "role_hint": manifest.get("role_hint"),
-        "structure": manifest.get("structure", {}),
+        "structure": header_structure,
     }
 
 

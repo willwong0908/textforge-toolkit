@@ -2836,7 +2836,11 @@ INDEX_HTML = """<!doctype html>
           <div class="review-conversation-main">
             <div class="review-conversation-head">
               <div>
-                <h3 id="reviewConversationTitle">新审校</h3>
+                <div class="review-conversation-title-row">
+                  <h3 id="reviewConversationTitle">新审校</h3>
+                  <input id="reviewConversationTitleInput" class="review-title-input hidden" type="text" maxlength="120" aria-label="会话名称" />
+                  <button id="renameReviewConversationButton" class="review-title-edit" type="button" aria-label="重命名会话" title="重命名会话">✎</button>
+                </div>
                 <p id="reviewConversationStatus">添加文件或直接输入待审校文本</p>
               </div>
               <div class="actions compact-actions">
@@ -2874,6 +2878,24 @@ INDEX_HTML = """<!doctype html>
           </div>
         </div>
 
+        <dialog id="reviewAttachmentMappingDialog" class="modal">
+          <form method="dialog" class="modal-card review-attachment-mapping-card">
+            <div class="modal-header">
+              <div><h2 id="reviewAttachmentMappingTitle">文件导入方式</h2><p>默认由 Workspace Agent 识别，也可以指定旧版 Excel 映射模板。</p></div>
+              <button id="closeReviewAttachmentMappingButton" class="icon-button" value="cancel" type="submit">×</button>
+            </div>
+            <label class="review-import-mode-option"><input type="radio" name="reviewAttachmentMappingMode" value="ai" checked /><span><strong>AI 识别</strong><small>由 Workspace Agent 判断原文、译文和文件关系</small></span></label>
+            <label class="review-import-mode-option"><input type="radio" name="reviewAttachmentMappingMode" value="preset" /><span><strong>导入映射模板</strong><small>按已保存的 Excel 列映射直接读取</small></span></label>
+            <label for="reviewAttachmentPresetSelect">映射模板</label>
+            <select id="reviewAttachmentPresetSelect"></select>
+            <p id="reviewAttachmentMappingHint" class="hint"></p>
+            <div class="modal-footer">
+              <button id="saveReviewAttachmentMappingButton" class="primary" type="button">确定</button>
+              <button class="secondary" value="cancel" type="submit">取消</button>
+            </div>
+          </form>
+        </dialog>
+
         <section id="reviewConversationResultCard" class="card review-conversation-results hidden">
           <div class="card-title">
             <div><h3>审校结果预览</h3><p>每个目标语言独立审校并生成结果文件。</p></div>
@@ -2897,7 +2919,7 @@ INDEX_HTML = """<!doctype html>
           </div>
           <div class="pattern-table-wrap review-result-table-wrap">
             <table class="pattern-table review-result-table">
-              <thead id="reviewResultHead"><tr><th>原文</th><th>译文</th><th>是否有问题</th><th>问题类型</th><th>问题说明</th><th>修改建议</th></tr></thead>
+              <thead id="reviewResultHead"><tr><th>文件名</th><th>原文</th><th>译文</th><th>是否有问题</th><th>问题类型</th><th>问题说明</th><th>修改建议</th></tr></thead>
               <tbody id="reviewResultBody"><tr><td colspan="6" class="empty-cell">暂无审校结果</td></tr></tbody>
             </table>
           </div>
@@ -4775,33 +4797,40 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-conversation-shell {
   display: grid;
   grid-template-columns: 236px minmax(0, 1fr);
-  min-height: calc(100vh - 190px);
+  height: clamp(620px, calc(100vh - 190px), 820px);
+  min-height: 620px;
   border: 1px solid var(--line);
   border-radius: 18px;
   overflow: hidden;
   background: var(--panel);
 }
-.review-session-sidebar { padding: 14px; border-right: 1px solid var(--line); background: rgba(20, 29, 48, 0.025); }
+.review-session-sidebar { min-height: 0; padding: 14px; border-right: 1px solid var(--line); background: rgba(20, 29, 48, 0.025); overflow: hidden; }
 .review-new-chat { width: 100%; }
-.review-conversation-list { display: grid; gap: 7px; margin-top: 14px; }
+.review-conversation-list { display: grid; gap: 7px; margin-top: 14px; max-height: calc(100% - 56px); overflow-y: auto; }
 .review-session-item { width: 100%; text-align: left; padding: 10px 11px; border: 0; border-radius: 10px; background: transparent; color: var(--text); }
 .review-session-item:hover, .review-session-item.active { background: rgba(48, 111, 214, 0.10); }
 .review-session-item strong, .review-session-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-session-item span { margin-top: 3px; color: var(--muted); font-size: 12px; }
-.review-conversation-main { display: grid; grid-template-rows: auto minmax(300px, 1fr) auto; min-width: 0; }
+.review-conversation-main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; }
 .review-conversation-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 20px; border-bottom: 1px solid var(--line); }
 .review-conversation-head h3, .review-conversation-head p { margin: 0; }
 .review-conversation-head p { margin-top: 4px; color: var(--muted); font-size: 13px; }
-.review-conversation-messages { padding: 24px max(24px, 8%); overflow: auto; display: flex; flex-direction: column; gap: 18px; }
+.review-conversation-title-row { display: flex; align-items: center; gap: 7px; }
+.review-title-input { width: min(360px, 52vw); padding: 5px 8px; font-size: 17px; font-weight: 750; }
+.review-title-edit { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); }
+.review-title-edit:hover { color: var(--primary); background: rgba(48, 111, 214, 0.08); }
+.review-conversation-messages { min-height: 0; padding: 24px max(24px, 8%); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 18px; scrollbar-gutter: stable; }
 .review-chat-message { max-width: min(820px, 88%); white-space: pre-wrap; line-height: 1.65; }
 .review-chat-message.user { align-self: flex-end; padding: 11px 15px; border-radius: 16px 16px 4px 16px; background: rgba(48, 111, 214, 0.12); }
 .review-chat-message.assistant { align-self: flex-start; }
 .review-chat-message.workspace-report { width: min(900px, 96%); padding: 16px 18px; border: 1px solid rgba(31, 111, 104, 0.18); border-radius: 16px; background: linear-gradient(180deg, #fbfefd 0%, #f5faf9 100%); box-shadow: 0 6px 20px rgba(23, 55, 70, 0.04); font-size: 13px; }
 .review-chat-message.error { color: var(--danger); }
 .review-chat-message-meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
-.review-decision-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
-.review-decision-actions input { width: min(420px, 100%); min-width: 220px; flex: 1 1 280px; }
-.review-decision-actions button { flex: 0 0 auto; }
+.review-decision-actions { display: grid; gap: 9px; margin-top: 12px; }
+.review-decision-confirm-row { display: flex; }
+.review-decision-other-row { display: flex; align-items: center; gap: 8px; }
+.review-decision-other-row input { width: min(420px, 100%); min-width: 220px; }
+.review-decision-other-row button { flex: 0 0 auto; }
 .review-composer { position: relative; margin: 0 max(24px, 8%) 22px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--panel); box-shadow: 0 10px 34px rgba(20, 30, 50, 0.08); }
 .review-composer.dragging { border-color: var(--primary); background: rgba(48, 111, 214, 0.04); }
 .review-composer textarea { width: 100%; border: 0; resize: vertical; min-height: 64px; box-shadow: none; background: transparent; }
@@ -4810,7 +4839,18 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-composer-tools, .review-attachment-chips, .review-target-tabs { display: flex; flex-wrap: wrap; gap: 7px; }
 .composer-chip, .review-attachment-chip, .review-target-tab { padding: 7px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 12px; }
 .composer-chip:hover { border-color: rgba(31, 111, 104, 0.42); background: #f7fbfa; }
-.review-attachment-chip { background: rgba(30, 148, 96, 0.08); }
+.review-attachment-chip { display: inline-flex; align-items: center; gap: 6px; padding: 0; overflow: hidden; background: rgba(30, 148, 96, 0.08); }
+.review-attachment-open { padding: 7px 3px 7px 10px; border: 0; background: transparent; color: inherit; font-size: inherit; }
+.review-attachment-remove { width: 26px; height: 26px; padding: 0; margin-right: 3px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); }
+.review-attachment-remove:hover { color: var(--danger); background: rgba(190, 44, 44, 0.09); }
+.review-message-files { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.review-message-file { display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid rgba(48, 111, 214, 0.2); border-radius: 10px; background: rgba(255,255,255,0.75); color: #245aa5; text-decoration: none; }
+.review-message-file:hover { border-color: rgba(48, 111, 214, 0.45); background: white; }
+.review-stream-output { max-height: 150px; margin-top: 8px; padding: 10px 12px; overflow: auto; border-radius: 10px; background: #f4f7fa; color: #536174; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.review-import-mode-option { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; cursor: pointer; }
+.review-import-mode-option span { display: grid; gap: 3px; }
+.review-import-mode-option small { color: var(--muted); }
+.review-attachment-mapping-card { width: min(560px, calc(100vw - 30px)); }
 .review-target-tab.active { color: white; background: var(--primary); border-color: var(--primary); }
 .review-send-button { min-width: 68px; border-radius: 999px; }
 .review-conversation-results { margin-top: 18px; }
@@ -4846,11 +4886,14 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   .mapping-template-bar label { grid-column: 1 / -1; }
   .mapping-template-bar .secondary { grid-column: 1 / 2; }
   .review-conversation-shell { grid-template-columns: 1fr; }
+  .review-conversation-shell { height: 760px; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
   .review-session-sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
   .review-conversation-list { display: flex; overflow-x: auto; }
   .review-session-item { min-width: 180px; }
   .review-language-popover { width: calc(100% - 20px); left: 10px !important; }
   .review-language-options { grid-template-columns: 1fr 1fr; }
+  .review-decision-other-row { align-items: stretch; flex-direction: column; }
+  .review-decision-other-row input { min-width: 0; width: 100%; }
 }
 """
 
@@ -4926,15 +4969,20 @@ let reviewConversationState = {
   currentId: "",
   snapshot: null,
   eventSource: null,
+  eventCursor: 0,
   refreshTimer: null,
   sourceLanguage: "auto",
   targetLanguages: ["auto"],
   promptTemplateId: "",
   languageMode: "source",
   activeTarget: "",
+  streamRunId: "",
+  streamText: "",
+  streamActive: false,
+  mappingAttachmentId: "",
 };
 const reviewLanguages = [
-  "自动检测", "简体中文", "繁体中文", "英语", "日语", "韩语", "法语", "德语", "西班牙语", "葡萄牙语",
+  "自动检测", "无源文", "简体中文", "繁体中文", "英语", "日语", "韩语", "法语", "德语", "西班牙语", "葡萄牙语",
   "意大利语", "俄语", "阿拉伯语", "泰语", "越南语", "印尼语", "土耳其语", "波兰语", "荷兰语", "瑞典语",
   "挪威语", "丹麦语", "芬兰语", "捷克语", "匈牙利语", "罗马尼亚语", "希腊语", "希伯来语", "乌克兰语",
 ];
@@ -6614,6 +6662,7 @@ function renderAiReviewResults(task, results) {
     let cells = [];
     if (isForbiddenOnly) {
       cells = [
+        item.source_file || "直接输入",
         item.source_text || "",
         item.target_text || "",
         item.matched_words || "",
@@ -6621,6 +6670,7 @@ function renderAiReviewResults(task, results) {
     } else if (isDirectional) {
       const checks = item.checks || {};
       cells = [
+        item.source_file || "直接输入",
         item.source_text || "",
         item.target_text || "",
         item.suggestion || "",
@@ -6631,6 +6681,7 @@ function renderAiReviewResults(task, results) {
       ];
     } else {
       cells = [
+        item.source_file || "直接输入",
         item.source_text || "",
         item.target_text || "",
         item.has_issue === null ? "" : item.has_issue ? "是" : "否",
@@ -6658,20 +6709,20 @@ function renderAiReviewResultHead(task) {
   const hasForbidden = Boolean(config.enable_forbidden_check);
   const reviewTypes = Array.isArray(config.review_types) ? config.review_types : [];
   const headers = isForbiddenOnly
-    ? ["原文", "译文", "禁用词检查情况"]
+    ? ["文件名", "原文", "译文", "禁用词检查情况"]
     : isDirectional
-      ? ["原文", "译文", "修改建议", ...reviewTypes.map((item) => String(item?.key || ""))]
-      : ["原文", "译文", "是否有问题", "问题类型", "问题说明", "修改建议"];
+      ? ["文件名", "原文", "译文", "修改建议", ...reviewTypes.map((item) => String(item?.key || ""))]
+      : ["文件名", "原文", "译文", "是否有问题", "问题类型", "问题说明", "修改建议"];
   if (hasForbidden && !isForbiddenOnly) {
     headers.push("禁用词检查情况");
   }
   const table = $("reviewResultBody").closest("table");
   const textColumnWidth = 300;
   const widths = isForbiddenOnly
-    ? [420, 420, 300]
+    ? [210, 420, 420, 300]
     : isDirectional
-      ? [320, 320, 320, ...reviewTypes.map(() => 240), ...(hasForbidden ? [240] : [])]
-      : [300, 300, 88, 150, 260, 300, ...(hasForbidden ? [240] : [])];
+      ? [210, 320, 320, 320, ...reviewTypes.map(() => 240), ...(hasForbidden ? [240] : [])]
+      : [210, 300, 300, 88, 150, 260, 300, ...(hasForbidden ? [240] : [])];
   table.style.minWidth = `${widths.reduce((total, width) => total + width, 0)}px`;
   table.querySelector("colgroup")?.remove();
   const colgroup = document.createElement("colgroup");
@@ -7004,6 +7055,10 @@ function renderReviewConversationList() {
 async function openReviewConversation(sessionId) {
   if (!sessionId) return;
   reviewConversationState.currentId = String(sessionId);
+  reviewConversationState.streamRunId = "";
+  reviewConversationState.streamText = "";
+  reviewConversationState.streamActive = false;
+  reviewConversationState.eventCursor = 0;
   const snapshot = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`);
   reviewConversationState.snapshot = snapshot;
   const session = snapshot.session || {};
@@ -7043,12 +7098,40 @@ function renderReviewMessages(messages, questions) {
     const content = document.createElement("div");
     content.textContent = message.content || "";
     item.appendChild(content);
+    const attachments = Array.isArray(message.payload?.attachments) ? message.payload.attachments : [];
+    if (attachments.length) {
+      const files = document.createElement("div");
+      files.className = "review-message-files";
+      attachments.forEach((attachment) => {
+        const link = document.createElement("a");
+        link.className = "review-message-file";
+        link.href = `/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachment.id)}/file`;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = `▤ ${attachment.original_filename || "文件"}`;
+        files.appendChild(link);
+      });
+      item.appendChild(files);
+    }
     const meta = document.createElement("div");
     meta.className = "review-chat-message-meta";
     meta.textContent = String(message.created_at || "").replace("T", " ");
     item.appendChild(meta);
     container.appendChild(item);
   });
+  if (reviewConversationState.streamActive) {
+    const item = document.createElement("div");
+    item.className = "review-chat-message assistant workspace-report";
+    const title = document.createElement("strong");
+    title.textContent = reviewConversationState.streamText
+      ? `Workspace Agent 正在输出 · 已接收 ${reviewConversationState.streamText.length} 字`
+      : "Workspace Agent 已连接，等待首个输出…";
+    const output = document.createElement("div");
+    output.className = "review-stream-output";
+    output.textContent = reviewConversationState.streamText.slice(-2400) || "正在分析文件结构…";
+    item.append(title, output);
+    container.appendChild(item);
+  }
   questions.filter((question) => question.status === "pending").forEach((question) => {
     const item = document.createElement("div");
     item.className = "review-chat-message assistant";
@@ -7056,6 +7139,8 @@ function renderReviewMessages(messages, questions) {
     prompt.textContent = question.prompt || "请确认识别结果";
     const actions = document.createElement("div");
     actions.className = "review-decision-actions";
+    const confirmRow = document.createElement("div");
+    confirmRow.className = "review-decision-confirm-row";
     const confirmButton = document.createElement("button");
     confirmButton.type = "button";
     confirmButton.className = "primary";
@@ -7068,7 +7153,11 @@ function renderReviewMessages(messages, questions) {
     otherButton.className = "secondary";
     otherButton.textContent = "提交";
     otherButton.addEventListener("click", () => submitReviewDecision(question, "other", otherInput.value).catch(showReviewConversationError));
-    actions.append(confirmButton, otherInput, otherButton);
+    const otherRow = document.createElement("div");
+    otherRow.className = "review-decision-other-row";
+    confirmRow.appendChild(confirmButton);
+    otherRow.append(otherInput, otherButton);
+    actions.append(confirmRow, otherRow);
     item.append(prompt, actions);
     container.appendChild(item);
   });
@@ -7087,10 +7176,22 @@ async function submitReviewDecision(question, action, answer) {
 function renderReviewAttachments(attachments) {
   const container = $("reviewAttachmentChips");
   container.innerHTML = "";
-  attachments.forEach((attachment) => {
+  attachments.filter((attachment) => !attachment.sent_at).forEach((attachment) => {
     const chip = document.createElement("span");
     chip.className = "review-attachment-chip";
-    chip.textContent = `${attachment.original_filename} · ${reviewAttachmentStatusLabel(attachment.status)}`;
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "review-attachment-open";
+    const modeLabel = attachment.mapping_mode === "preset" ? "映射模板" : "AI 识别";
+    openButton.textContent = `${attachment.original_filename} · ${modeLabel}`;
+    openButton.addEventListener("click", () => openReviewAttachmentMappingDialog(attachment).catch(showReviewConversationError));
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "review-attachment-remove";
+    removeButton.title = "移除文件";
+    removeButton.textContent = "×";
+    removeButton.addEventListener("click", () => removeReviewPendingAttachment(attachment.id).catch(showReviewConversationError));
+    chip.append(openButton, removeButton);
     container.appendChild(chip);
   });
 }
@@ -7133,14 +7234,38 @@ async function refreshCurrentReviewConversation() {
 
 function connectReviewConversationEvents(sessionId) {
   if (reviewConversationState.eventSource) reviewConversationState.eventSource.close();
-  const source = new EventSource(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/events`);
+  const source = new EventSource(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/events?after_id=${reviewConversationState.eventCursor}`);
   reviewConversationState.eventSource = source;
   const eventNames = [
-    "message.created", "attachment.uploaded", "attachment.inspected", "workspace.started", "workspace.ready",
+    "message.created", "attachment.uploaded", "attachment.deleted", "attachment.inspected", "workspace.started", "workspace.ready",
     "workspace.needs_input", "workspace.failed", "workspace.question", "review.started", "review.progress",
     "review.package_completed", "review.completed",
   ];
-  eventNames.forEach((name) => source.addEventListener(name, scheduleReviewConversationRefresh));
+  eventNames.forEach((name) => source.addEventListener(name, (event) => {
+    reviewConversationState.eventCursor = Math.max(reviewConversationState.eventCursor, Number(event.lastEventId || 0));
+    if (["workspace.ready", "workspace.needs_input", "workspace.failed"].includes(name)) {
+      reviewConversationState.streamActive = false;
+      reviewConversationState.streamText = "";
+    }
+    scheduleReviewConversationRefresh();
+  }));
+  source.addEventListener("workspace.output_started", (event) => {
+    reviewConversationState.eventCursor = Math.max(reviewConversationState.eventCursor, Number(event.lastEventId || 0));
+    const payload = JSON.parse(event.data || "{}").payload || {};
+    reviewConversationState.streamRunId = String(payload.run_id || "");
+    reviewConversationState.streamText = "";
+    reviewConversationState.streamActive = true;
+    renderReviewMessages(reviewConversationState.snapshot?.messages || [], reviewConversationState.snapshot?.questions || []);
+  });
+  source.addEventListener("workspace.delta", (event) => {
+    reviewConversationState.eventCursor = Math.max(reviewConversationState.eventCursor, Number(event.lastEventId || 0));
+    const payload = JSON.parse(event.data || "{}").payload || {};
+    if (reviewConversationState.streamRunId && payload.run_id !== reviewConversationState.streamRunId) return;
+    reviewConversationState.streamRunId = String(payload.run_id || reviewConversationState.streamRunId || "");
+    reviewConversationState.streamActive = true;
+    reviewConversationState.streamText += String(payload.delta || "");
+    renderReviewMessages(reviewConversationState.snapshot?.messages || [], reviewConversationState.snapshot?.questions || []);
+  });
   source.onerror = () => {
     if (reviewConversationState.currentId !== sessionId) source.close();
   };
@@ -7167,7 +7292,7 @@ async function uploadReviewConversationFiles(files) {
 async function sendReviewConversationMessage() {
   if (!reviewConversationState.currentId) await createReviewConversation();
   const text = $("reviewComposerInput").value.trim();
-  const attachments = reviewConversationState.snapshot?.attachments || [];
+  const attachments = (reviewConversationState.snapshot?.attachments || []).filter((item) => !item.sent_at);
   if (!text && !attachments.length) throw new Error("请输入待审校文本或添加文件");
   $("sendReviewConversationButton").disabled = true;
   $("reviewConversationHint").textContent = "Workspace Agent 正在识别内容…";
@@ -7187,6 +7312,91 @@ async function sendReviewConversationMessage() {
   } finally {
     $("sendReviewConversationButton").disabled = false;
   }
+}
+
+function beginRenameCurrentReviewConversation() {
+  const input = $("reviewConversationTitleInput");
+  if (!input.classList.contains("hidden")) {
+    saveCurrentReviewConversationTitle().catch(showReviewConversationError);
+    return;
+  }
+  input.value = reviewConversationState.snapshot?.session?.title || "新审校";
+  $("reviewConversationTitle").classList.add("hidden");
+  input.classList.remove("hidden");
+  $("renameReviewConversationButton").textContent = "✓";
+  input.focus();
+  input.select();
+}
+
+function cancelRenameCurrentReviewConversation() {
+  $("reviewConversationTitleInput").classList.add("hidden");
+  $("reviewConversationTitle").classList.remove("hidden");
+  $("renameReviewConversationButton").textContent = "✎";
+}
+
+async function saveCurrentReviewConversationTitle() {
+  const title = $("reviewConversationTitleInput").value.trim();
+  if (!title) throw new Error("会话名称不能为空");
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+  await refreshCurrentReviewConversation();
+  await loadReviewConversations(reviewConversationState.currentId);
+  cancelRenameCurrentReviewConversation();
+}
+
+async function removeReviewPendingAttachment(attachmentId) {
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+    method: "DELETE",
+  });
+  await refreshCurrentReviewConversation();
+}
+
+async function openReviewAttachmentMappingDialog(attachment) {
+  reviewConversationState.mappingAttachmentId = String(attachment.id || "");
+  $("reviewAttachmentMappingTitle").textContent = attachment.original_filename || "文件导入方式";
+  if (!aiReviewExcelMappingPresets.length) await loadAiReviewExcelMappingPresets();
+  const select = $("reviewAttachmentPresetSelect");
+  select.innerHTML = "";
+  aiReviewExcelMappingPresets.forEach((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.id;
+    option.textContent = preset.name || "未命名模板";
+    select.appendChild(option);
+  });
+  const requestedMode = attachment.mapping_mode === "preset" ? "preset" : "ai";
+  document.querySelectorAll('input[name="reviewAttachmentMappingMode"]').forEach((input) => {
+    input.checked = input.value === requestedMode;
+  });
+  select.value = attachment.mapping_preset_id || select.options[0]?.value || "";
+  const isExcel = /\.(xlsx|xlsm)$/i.test(attachment.original_filename || "");
+  const presetRadio = document.querySelector('input[name="reviewAttachmentMappingMode"][value="preset"]');
+  presetRadio.disabled = !isExcel;
+  if (!isExcel && requestedMode === "preset") {
+    document.querySelector('input[name="reviewAttachmentMappingMode"][value="ai"]').checked = true;
+  }
+  updateReviewAttachmentMappingControls();
+  $("reviewAttachmentMappingHint").textContent = isExcel ? "" : "该格式仅支持 AI 识别；映射模板只适用于 Excel。";
+  $("reviewAttachmentMappingDialog").showModal();
+}
+
+function updateReviewAttachmentMappingControls() {
+  const mode = document.querySelector('input[name="reviewAttachmentMappingMode"]:checked')?.value || "ai";
+  $("reviewAttachmentPresetSelect").disabled = mode !== "preset";
+}
+
+async function saveReviewAttachmentMapping() {
+  const attachmentId = reviewConversationState.mappingAttachmentId;
+  const mode = document.querySelector('input[name="reviewAttachmentMappingMode"]:checked')?.value || "ai";
+  const presetId = mode === "preset" ? $("reviewAttachmentPresetSelect").value : null;
+  if (mode === "preset" && !presetId) throw new Error("请先选择映射模板");
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ mode, preset_id: presetId }),
+  });
+  $("reviewAttachmentMappingDialog").close();
+  await refreshCurrentReviewConversation();
 }
 
 async function deleteCurrentReviewConversation() {
@@ -7226,8 +7436,11 @@ function renderReviewLanguageOptions() {
   const search = $("reviewLanguageSearch").value.trim().toLowerCase();
   const container = $("reviewLanguageOptions");
   container.innerHTML = "";
-  reviewLanguages.filter((language) => !search || language.toLowerCase().includes(search)).forEach((language) => {
-    const value = language === "自动检测" ? "auto" : language;
+  reviewLanguages
+    .filter((language) => reviewConversationState.languageMode === "source" || language !== "无源文")
+    .filter((language) => !search || language.toLowerCase().includes(search))
+    .forEach((language) => {
+    const value = language === "自动检测" ? "auto" : language === "无源文" ? "none" : language;
     const label = document.createElement("label");
     label.className = "review-language-option";
     const input = document.createElement("input");
@@ -7269,7 +7482,10 @@ function renderReviewLanguageOptions() {
 function updateReviewComposerChips() {
   const prompt = aiReviewPromptTemplates.find((item) => item.id === reviewConversationState.promptTemplateId) || aiReviewPromptTemplates[0];
   $("reviewPromptChip").textContent = `提示词：${prompt?.name || "默认"}`;
-  $("reviewSourceLanguageChip").textContent = `源语言：${reviewConversationState.sourceLanguage === "auto" ? "自动" : reviewConversationState.sourceLanguage}`;
+  const sourceLabel = reviewConversationState.sourceLanguage === "auto"
+    ? "自动"
+    : reviewConversationState.sourceLanguage === "none" ? "无" : reviewConversationState.sourceLanguage;
+  $("reviewSourceLanguageChip").textContent = `源语言：${sourceLabel}`;
   const targets = reviewConversationState.targetLanguages.map((value) => value === "auto" ? "自动" : value);
   $("reviewTargetLanguageChip").textContent = `目标语言：${targets.join("、")}`;
 }
@@ -8778,7 +8994,23 @@ document.querySelectorAll(".preset-color-btn").forEach((button) => {
 $("selectAllCrossHeadersButton").addEventListener("click", () => setCrossExcelHeaderSelection(true));
 $("clearCrossHeadersButton").addEventListener("click", () => setCrossExcelHeaderSelection(false));
 $("newReviewConversationButton").addEventListener("click", () => createReviewConversation().catch(showReviewConversationError));
+$("renameReviewConversationButton").addEventListener("click", beginRenameCurrentReviewConversation);
+$("reviewConversationTitleInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveCurrentReviewConversationTitle().catch(showReviewConversationError);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    cancelRenameCurrentReviewConversation();
+  }
+});
 $("deleteReviewConversationButton").addEventListener("click", () => deleteCurrentReviewConversation().catch(showReviewConversationError));
+$("saveReviewAttachmentMappingButton").addEventListener("click", () => saveReviewAttachmentMapping().catch((error) => {
+  $("reviewAttachmentMappingHint").textContent = error?.message || String(error || "保存失败");
+}));
+document.querySelectorAll('input[name="reviewAttachmentMappingMode"]').forEach((input) => {
+  input.addEventListener("change", updateReviewAttachmentMappingControls);
+});
 $("reviewUploadChip").addEventListener("click", () => $("reviewConversationFileInput").click());
 $("reviewConversationFileInput").addEventListener("change", () => {
   const files = $("reviewConversationFileInput").files;

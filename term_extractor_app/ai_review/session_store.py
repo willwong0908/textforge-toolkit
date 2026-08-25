@@ -29,13 +29,14 @@ def create_session(
         conn.execute(
             """
             INSERT INTO review_sessions (
-                id, title, status, prompt_template_id, source_language,
+                id, title, title_custom, status, prompt_template_id, source_language,
                 target_languages_json, auto_start, created_at, updated_at
-            ) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 str(title or "新审校").strip()[:120] or "新审校",
+                0 if str(title or "").strip() in {"", "新审校"} else 1,
                 prompt_template_id,
                 str(source_language or "auto").strip() or "auto",
                 dumps_json(targets),
@@ -103,7 +104,7 @@ def get_session_snapshot(session_id: str) -> dict[str, Any] | None:
 
 def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
     allowed = {
-        "title", "status", "prompt_template_id", "source_language", "target_languages_json",
+        "title", "title_custom", "status", "prompt_template_id", "source_language", "target_languages_json",
         "auto_start", "context_summary", "error_message",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
@@ -111,6 +112,8 @@ def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
         values["target_languages_json"] = dumps_json(_normalize_languages(values["target_languages_json"]))
     if "auto_start" in values:
         values["auto_start"] = 1 if values["auto_start"] else 0
+    if "title_custom" in values:
+        values["title_custom"] = 1 if values["title_custom"] else 0
     values["updated_at"] = utc_now()
     assignments = ", ".join(f"{key} = ?" for key in values)
     with get_connection() as conn:
@@ -159,7 +162,8 @@ def delete_session(session_id: str) -> None:
 
 
 def add_attachment(session_id: str, filename: str, data: bytes) -> dict[str, Any]:
-    if not get_session(session_id):
+    session = get_session(session_id)
+    if not session:
         raise ValueError("审校会话不存在")
     if not data:
         raise ValueError("上传文件为空")
@@ -178,6 +182,16 @@ def add_attachment(session_id: str, filename: str, data: bytes) -> dict[str, Any
             (attachment_id, session_id, filename, str(stored_path), digest, len(data), now, now),
         )
     update_session(session_id, status="draft")
+    if not session.get("title_custom"):
+        with get_connection() as conn:
+            attachment_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM review_attachments WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()[0]
+            )
+        if attachment_count == 1:
+            update_session(session_id, title=Path(filename).name[:120] or "新审校")
     attachment = get_attachment(attachment_id) or {}
     emit_event(session_id, "attachment.uploaded", {"attachment": _public_attachment(attachment)})
     return attachment
@@ -190,7 +204,10 @@ def get_attachment(attachment_id: str) -> dict[str, Any] | None:
 
 
 def update_attachment(attachment_id: str, **fields: Any) -> dict[str, Any]:
-    allowed = {"file_type", "status", "manifest_json", "error_message"}
+    allowed = {
+        "file_type", "status", "manifest_json", "mapping_mode", "mapping_preset_id",
+        "sent_at", "error_message",
+    }
     values = {key: value for key, value in fields.items() if key in allowed}
     if "manifest_json" in values and not isinstance(values["manifest_json"], str):
         values["manifest_json"] = dumps_json(values["manifest_json"])
@@ -202,6 +219,60 @@ def update_attachment(attachment_id: str, **fields: Any) -> dict[str, Any]:
             [*values.values(), attachment_id],
         )
     return get_attachment(attachment_id) or {}
+
+
+def get_pending_attachments(session_id: str) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM review_attachments
+            WHERE session_id = ? AND sent_at IS NULL
+            ORDER BY created_at, rowid
+            """,
+            (session_id,),
+        ).fetchall()
+    return [_attachment_to_dict(row) for row in rows]
+
+
+def mark_attachments_sent(session_id: str, attachment_ids: list[str]) -> list[dict[str, Any]]:
+    normalized = list(dict.fromkeys(str(value) for value in attachment_ids if value))
+    if not normalized:
+        return []
+    placeholders = ",".join("?" for _ in normalized)
+    now = utc_now()
+    with get_connection() as conn:
+        conn.execute(
+            f"UPDATE review_attachments SET sent_at = ?, updated_at = ? "
+            f"WHERE session_id = ? AND sent_at IS NULL AND id IN ({placeholders})",
+            (now, now, session_id, *normalized),
+        )
+        rows = conn.execute(
+            f"SELECT * FROM review_attachments WHERE session_id = ? AND id IN ({placeholders}) "
+            "ORDER BY created_at, rowid",
+            (session_id, *normalized),
+        ).fetchall()
+    return [_attachment_to_dict(row) for row in rows]
+
+
+def delete_pending_attachment(session_id: str, attachment_id: str) -> None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM review_attachments WHERE id = ? AND session_id = ?",
+            (attachment_id, session_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("附件不存在")
+        if row["sent_at"]:
+            raise ValueError("已发送的附件不能从对话中移除")
+        conn.execute("DELETE FROM review_attachments WHERE id = ?", (attachment_id,))
+    path = Path(str(row["stored_path"] or ""))
+    try:
+        resolved = path.resolve()
+        if resolved.parent == UPLOADS_DIR.resolve():
+            resolved.unlink(missing_ok=True)
+    except OSError:
+        pass
+    emit_event(session_id, "attachment.deleted", {"attachment_id": attachment_id})
 
 
 def add_message(
@@ -253,16 +324,19 @@ def recent_context(session_id: str, limit: int = 24, max_chars: int = 32000) -> 
     return result
 
 
-def create_workspace_run(session_id: str, *, model: str, input_signature: str) -> dict[str, Any]:
+def create_workspace_run(
+    session_id: str, *, model: str, input_signature: str, attachment_ids: list[str] | None = None
+) -> dict[str, Any]:
     run_id = uuid.uuid4().hex
     now = utc_now()
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO workspace_runs (id, session_id, status, model, input_signature, created_at, updated_at)
-            VALUES (?, ?, 'inspecting', ?, ?, ?, ?)
+            INSERT INTO workspace_runs (
+                id, session_id, status, model, input_signature, attachment_ids_json, created_at, updated_at
+            ) VALUES (?, ?, 'inspecting', ?, ?, ?, ?, ?)
             """,
-            (run_id, session_id, model, input_signature, now, now),
+            (run_id, session_id, model, input_signature, dumps_json(attachment_ids or []), now, now),
         )
         row = conn.execute("SELECT * FROM workspace_runs WHERE id = ?", (run_id,)).fetchone()
     return _run_to_dict(row)
@@ -364,6 +438,7 @@ def _session_to_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"],
         "title": row["title"],
+        "title_custom": bool(row["title_custom"]) if "title_custom" in row.keys() else False,
         "status": row["status"],
         "prompt_template_id": row["prompt_template_id"],
         "source_language": row["source_language"],
@@ -387,6 +462,9 @@ def _attachment_to_dict(row: Any) -> dict[str, Any]:
         "size_bytes": row["size_bytes"],
         "status": row["status"],
         "manifest": loads_json(row["manifest_json"], {}),
+        "mapping_mode": row["mapping_mode"] if "mapping_mode" in row.keys() else "ai",
+        "mapping_preset_id": row["mapping_preset_id"] if "mapping_preset_id" in row.keys() else None,
+        "sent_at": row["sent_at"] if "sent_at" in row.keys() else None,
         "error_message": row["error_message"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -418,6 +496,7 @@ def _run_to_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"], "session_id": row["session_id"], "status": row["status"],
         "model": row["model"], "input_signature": row["input_signature"],
+        "attachment_ids": loads_json(row["attachment_ids_json"], []) if "attachment_ids_json" in row.keys() else [],
         "plan": loads_json(row["plan_json"], {}), "error_message": row["error_message"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }

@@ -215,6 +215,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS review_sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                title_custom INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'draft',
                 prompt_template_id TEXT,
                 source_language TEXT NOT NULL DEFAULT 'auto',
@@ -239,6 +240,9 @@ def init_db() -> None:
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'uploaded',
                 manifest_json TEXT NOT NULL DEFAULT '{}',
+                mapping_mode TEXT NOT NULL DEFAULT 'ai',
+                mapping_preset_id TEXT,
+                sent_at TEXT,
                 error_message TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -268,6 +272,7 @@ def init_db() -> None:
                 status TEXT NOT NULL,
                 model TEXT NOT NULL DEFAULT '',
                 input_signature TEXT NOT NULL DEFAULT '',
+                attachment_ids_json TEXT NOT NULL DEFAULT '[]',
                 plan_json TEXT NOT NULL DEFAULT '{}',
                 error_message TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
@@ -365,6 +370,38 @@ def init_db() -> None:
             conn.execute("ALTER TABLE review_tasks ADD COLUMN session_id TEXT")
         if "target_language" not in task_columns:
             conn.execute("ALTER TABLE review_tasks ADD COLUMN target_language TEXT NOT NULL DEFAULT ''")
+        session_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_sessions)").fetchall()
+        }
+        if "title_custom" not in session_columns:
+            conn.execute("ALTER TABLE review_sessions ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0")
+        attachment_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_attachments)").fetchall()
+        }
+        if "mapping_mode" not in attachment_columns:
+            conn.execute("ALTER TABLE review_attachments ADD COLUMN mapping_mode TEXT NOT NULL DEFAULT 'ai'")
+        if "mapping_preset_id" not in attachment_columns:
+            conn.execute("ALTER TABLE review_attachments ADD COLUMN mapping_preset_id TEXT")
+        if "sent_at" not in attachment_columns:
+            conn.execute("ALTER TABLE review_attachments ADD COLUMN sent_at TEXT")
+            conn.execute(
+                """
+                UPDATE review_attachments
+                SET sent_at = created_at
+                WHERE EXISTS (
+                    SELECT 1 FROM workspace_runs
+                    WHERE workspace_runs.session_id = review_attachments.session_id
+                )
+                """
+            )
+        run_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(workspace_runs)").fetchall()
+        }
+        if "attachment_ids_json" not in run_columns:
+            conn.execute("ALTER TABLE workspace_runs ADD COLUMN attachment_ids_json TEXT NOT NULL DEFAULT '[]'")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_review_followup_messages_result

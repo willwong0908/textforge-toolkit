@@ -11,10 +11,15 @@ from openpyxl import Workbook
 
 from term_extractor_app.ai_review import cache_service, config, database, session_store
 from term_extractor_app.ai_review.readers import ReaderError, build_default_registry
-from term_extractor_app.ai_review.workspace_service import inspect_workspace_sync
+from term_extractor_app.ai_review.excel_mapping_service import save_excel_mapping_preset
+from term_extractor_app.ai_review.workspace_service import (
+    _structure_signature,
+    inspect_workspace_sync,
+    save_confirmed_profile,
+)
 
 
-def _workspace_response(messages: list[dict[str, str]]) -> str:
+def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     prompt = messages[-1]["content"]
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
     content_files = list(manifests)
@@ -35,7 +40,7 @@ def _workspace_response(messages: list[dict[str, str]]) -> str:
                 {"language": "简体中文", "mappings": [{"attachment_id": attachment_id, "scope": "table", "source_column_index": 0, "target_column_index": 1}]},
                 {"language": "日语", "mappings": [{"attachment_id": attachment_id, "scope": "table", "source_column_index": 0, "target_column_index": 2}]},
             ])
-    return json.dumps({
+    response = json.dumps({
         "content_files": content_files,
         "reference_files": [],
         "source_language": "auto",
@@ -47,6 +52,10 @@ def _workspace_response(messages: list[dict[str, str]]) -> str:
         "needs_input": False,
         "question": "",
     }, ensure_ascii=False)
+    if on_delta:
+        for start in range(0, len(response), 24):
+            on_delta(response[start : start + 24])
+    return response
 
 
 class ReaderRegistryTests(unittest.TestCase):
@@ -192,6 +201,91 @@ class WorkspaceSessionTests(unittest.TestCase):
         workspace_mock.assert_not_called()
         self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "Hello")
         self.assertEqual(plan["confidence"], 0.98)
+
+    def test_confirmed_table_structure_cache_requires_exact_languages_and_headers(self) -> None:
+        csv_data = "Source,简体中文,日本語\nHello,你好,こんにちは\n".encode("utf-8")
+        first = session_store.create_session(source_language="英语", target_languages=["简体中文", "日语"])
+        session_store.add_attachment(first["id"], "translations.csv", csv_data)
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+            side_effect=_workspace_response,
+        ):
+            inspect_workspace_sync(first["id"])
+        first_run = session_store.get_session_snapshot(first["id"])["workspace_runs"][0]
+        self.assertTrue(first_run["attachment_ids"])
+        self.assertIn("target_column_index", first_run["plan"]["targets"][0]["units"][0]["metadata"])
+        save_confirmed_profile(first_run["id"])
+
+        second = session_store.create_session(source_language="英语", target_languages=["简体中文", "日语"])
+        second_attachment = session_store.add_attachment(second["id"], "translations.csv", csv_data)
+        second_document = build_default_registry().read(
+            Path(second_attachment["stored_path"]), second_attachment["original_filename"]
+        )
+        expected_signature = _structure_signature(
+            {second_attachment["id"]: second_document}, "英语", ["简体中文", "日语"]
+        )
+        with database.get_connection() as conn:
+            cached_row = conn.execute(
+                "SELECT signature FROM extraction_profiles WHERE signature = ?", (expected_signature,)
+            ).fetchone()
+            all_signatures = [row["signature"] for row in conn.execute("SELECT signature FROM extraction_profiles")]
+        self.assertEqual(all_signatures, [expected_signature])
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+        ) as workspace_mock:
+            cached = inspect_workspace_sync(second["id"])
+        workspace_mock.assert_not_called()
+        self.assertTrue(cached["cache_hit"])
+        self.assertIn("本地结构缓存", cached["assumptions"][0])
+
+        changed = session_store.create_session(source_language="英语", target_languages=["简体中文"])
+        session_store.add_attachment(changed["id"], "translations.csv", csv_data)
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+            side_effect=_workspace_response,
+        ) as workspace_mock:
+            inspect_workspace_sync(changed["id"])
+        workspace_mock.assert_called_once()
+
+    def test_selected_excel_mapping_preset_bypasses_workspace(self) -> None:
+        workbook = Workbook()
+        workbook.active.title = "Text"
+        workbook.active.append(["Source", "Target"])
+        workbook.active.append(["Hello", "你好"])
+        path = Path(self.temp.name) / "mapped.xlsx"
+        workbook.save(path)
+        preset = save_excel_mapping_preset(
+            "双语模板",
+            {
+                "source_language": "英语",
+                "target_language": "简体中文",
+                "sheets": [{"sheet_name": "Text", "mappings": [{"source_column": 0, "target_column": 1}]}],
+            },
+        )
+        session = session_store.create_session(source_language="英语", target_languages=["简体中文"])
+        attachment = session_store.add_attachment(session["id"], "mapped.xlsx", path.read_bytes())
+        session_store.update_attachment(
+            attachment["id"], mapping_mode="preset", mapping_preset_id=preset["id"]
+        )
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+        ) as workspace_mock:
+            plan = inspect_workspace_sync(session["id"])
+        workspace_mock.assert_not_called()
+        self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "Hello")
+        self.assertEqual(plan["targets"][0]["units"][0]["target_text"], "你好")
 
     def test_delete_session_removes_private_attachments(self) -> None:
         session = session_store.create_session()

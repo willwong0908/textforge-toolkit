@@ -4,21 +4,28 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .session_store import (
     add_attachment,
+    add_message,
     answer_question,
     create_session,
     delete_session,
+    delete_pending_attachment,
+    get_attachment,
     get_events,
+    get_pending_attachments,
     get_session,
     get_session_snapshot,
     list_sessions,
+    mark_attachments_sent,
     update_session,
+    update_attachment,
 )
+from .excel_mapping_service import get_excel_mapping_preset
 from .workflow_service import get_session_task_results, start_session_review
 from .workspace_service import submit_workspace_inspection
 from ..telemetry import track_event
@@ -47,6 +54,15 @@ class SessionDeletePayload(BaseModel):
     confirm: bool = False
 
 
+class SessionRenamePayload(BaseModel):
+    title: str
+
+
+class AttachmentMappingPayload(BaseModel):
+    mode: str = "ai"
+    preset_id: str | None = None
+
+
 class WorkspaceDecisionPayload(BaseModel):
     run_id: str | None = None
     question_id: str | None = None
@@ -71,6 +87,18 @@ def conversation(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="审校会话不存在")
     snapshot["task_results"] = get_session_task_results(session_id)
     return snapshot
+
+
+@router.patch("/{session_id}")
+def rename_conversation(session_id: str, payload: SessionRenamePayload) -> dict[str, Any]:
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="会话名称不能为空")
+    try:
+        session = update_session(session_id, title=title[:120], title_custom=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "session": session}
 
 
 @router.delete("/{session_id}")
@@ -102,6 +130,53 @@ async def upload_attachments(session_id: str, files: list[UploadFile] = File(...
     return {"attachments": result}
 
 
+@router.patch("/{session_id}/attachments/{attachment_id}")
+def configure_attachment_mapping(
+    session_id: str, attachment_id: str, payload: AttachmentMappingPayload
+) -> dict[str, Any]:
+    attachment = get_attachment(attachment_id)
+    if not attachment or attachment["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    if attachment.get("sent_at"):
+        raise HTTPException(status_code=400, detail="已发送附件不能修改导入方式")
+    mode = payload.mode.strip().lower()
+    if mode not in {"ai", "preset"}:
+        raise HTTPException(status_code=400, detail="导入方式无效")
+    preset_id = None
+    if mode == "preset":
+        if attachment["original_filename"].lower().endswith((".xlsx", ".xlsm")) is False:
+            raise HTTPException(status_code=400, detail="映射模板仅适用于 Excel 文件")
+        try:
+            preset = get_excel_mapping_preset(str(payload.preset_id or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        preset_id = preset["id"]
+    updated = update_attachment(
+        attachment_id,
+        mapping_mode=mode,
+        mapping_preset_id=preset_id,
+    )
+    return {"ok": True, "attachment": updated}
+
+
+@router.delete("/{session_id}/attachments/{attachment_id}")
+def remove_pending_attachment(session_id: str, attachment_id: str) -> dict[str, Any]:
+    try:
+        delete_pending_attachment(session_id, attachment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.get("/{session_id}/attachments/{attachment_id}/file")
+def open_conversation_attachment(session_id: str, attachment_id: str) -> FileResponse:
+    attachment = get_attachment(attachment_id)
+    if not attachment or attachment["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    path = str(attachment.get("stored_path") or "")
+    return FileResponse(path, filename=attachment["original_filename"])
+
+
 @router.post("/{session_id}/messages")
 def send_message(session_id: str, payload: SessionMessagePayload) -> dict[str, Any]:
     session = get_session(session_id)
@@ -115,8 +190,26 @@ def send_message(session_id: str, payload: SessionMessagePayload) -> dict[str, A
     if payload.auto_start is not None:
         update_fields["auto_start"] = payload.auto_start
     update_session(session_id, **update_fields)
+    pending = get_pending_attachments(session_id)
+    attachment_ids = [str(item["id"]) for item in pending]
+    if not payload.text.strip() and not attachment_ids:
+        raise HTTPException(status_code=400, detail="请输入待审校文本或添加文件")
     try:
-        run_id = submit_workspace_inspection(session_id, payload.text)
+        sent = mark_attachments_sent(session_id, attachment_ids)
+        content = payload.text.strip() or f"已发送 {len(sent)} 个文件"
+        add_message(
+            session_id,
+            "user",
+            "attachment_message" if sent else "message",
+            content,
+            {"attachments": [{key: value for key, value in item.items() if key != "stored_path"} for item in sent]},
+        )
+        run_id = submit_workspace_inspection(
+            session_id,
+            payload.text,
+            attachment_ids=attachment_ids,
+            record_user_message=False,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     track_event("task_start.ai_review_workspace")
@@ -133,7 +226,17 @@ def submit_decision(session_id: str, payload: WorkspaceDecisionPayload) -> dict[
         if payload.action == "confirm":
             tasks = start_session_review(session_id, payload.run_id)
             return {"ok": True, "tasks": tasks}
-        run_id = submit_workspace_inspection(session_id, "", adjustment_text=payload.answer)
+        snapshot = get_session_snapshot(session_id) or {}
+        source_run = next(
+            (item for item in snapshot.get("workspace_runs", []) if item.get("id") == payload.run_id),
+            None,
+        )
+        run_id = submit_workspace_inspection(
+            session_id,
+            "",
+            adjustment_text=payload.answer,
+            attachment_ids=list((source_run or {}).get("attachment_ids") or []),
+        )
         return {"ok": True, "run_id": run_id}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -148,12 +251,20 @@ def conversation_results(session_id: str) -> dict[str, Any]:
 
 
 @router.get("/{session_id}/events")
-async def conversation_events(session_id: str, after_id: int = Query(0, ge=0)) -> StreamingResponse:
+async def conversation_events(
+    session_id: str,
+    after_id: int = Query(0, ge=0),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
     if not get_session(session_id):
         raise HTTPException(status_code=404, detail="审校会话不存在")
 
     async def stream():
-        cursor = after_id
+        try:
+            header_cursor = int(last_event_id or 0)
+        except ValueError:
+            header_cursor = 0
+        cursor = max(after_id, header_cursor)
         idle_ticks = 0
         while True:
             events = get_events(session_id, cursor)

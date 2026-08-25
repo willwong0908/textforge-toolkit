@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
+
+import httpx
 
 from ..models import LLMRequest, ProviderSettings
 from ..providers import ProviderRegistry
@@ -46,7 +49,10 @@ def get_shared_ai_settings() -> dict[str, Any]:
     }
 
 
-def workspace_chat(messages: list[dict[str, str]]) -> str:
+def workspace_chat(messages: list[dict[str, str]], on_delta: Any | None = None) -> str:
+    if on_delta is not None:
+        return _workspace_chat_stream(messages, on_delta)
+
     async def _run() -> str:
         provider_name, provider = _load_provider_settings()
         settings = get_shared_ai_settings()
@@ -71,6 +77,91 @@ def workspace_chat(messages: list[dict[str, str]]) -> str:
         return str(response.content or "")
 
     return asyncio.run(_run())
+
+
+def _workspace_chat_stream(messages: list[dict[str, str]], on_delta: Any) -> str:
+    _, provider = _load_provider_settings()
+    settings = get_shared_ai_settings()
+    if not provider.api_key:
+        raise SharedProviderError("请先配置模型 API Key")
+    if not provider.model:
+        raise SharedProviderError("请先在模型设置中选择模型")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {provider.api_key}"}
+    headers.update(dict(provider.extra_headers or {}))
+    payload: dict[str, Any] = {
+        "model": provider.model,
+        "messages": messages,
+        "temperature": 0.0,
+        "stream": True,
+    }
+    payload["enable_thinking"] = bool(settings.get("workspace_enable_thinking", False))
+    url = provider.base_url.rstrip("/") + "/chat/completions"
+    chunks: list[str] = []
+    try:
+        with httpx.Client(
+            timeout=float(max(10, provider.timeout_seconds)),
+            verify=False,
+            trust_env=not provider.disable_system_proxy,
+        ) as client:
+            with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    raise SharedProviderError(
+                        f"Workspace Agent 请求失败：HTTP {response.status_code} {response.text[:500]}"
+                    )
+                content_type = str(response.headers.get("content-type") or "").lower()
+                if "text/event-stream" not in content_type:
+                    response.read()
+                    data = response.json()
+                    content = _stream_response_content(data)
+                    if content:
+                        on_delta(content)
+                        return content
+                    raise SharedProviderError("Workspace Agent 返回内容为空")
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = _stream_delta_content(data)
+                    on_delta(delta)
+                    if delta:
+                        chunks.append(delta)
+    except httpx.HTTPError as exc:
+        raise SharedProviderError(str(exc) or "Workspace Agent 网络请求失败") from exc
+    content = "".join(chunks)
+    if not content.strip():
+        raise SharedProviderError("Workspace Agent 返回内容为空")
+    return content
+
+
+def _stream_delta_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    delta = choices[0].get("delta") or {}
+    if not isinstance(delta, dict):
+        return ""
+    content = delta.get("content") or ""
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text") or "") for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return str(content)
+
+
+def _stream_response_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "") if isinstance(message, dict) else ""
 
 
 def list_models(api_key: str) -> list[str]:

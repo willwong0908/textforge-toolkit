@@ -14,7 +14,7 @@ from .database import get_connection
 
 
 NORMAL_HEADERS = [
-    "来源文件",
+    "文件名",
     "sheet / segment ID",
     "原始行号",
     "原文",
@@ -38,10 +38,10 @@ def generate_review_excel(task_id: str) -> Path:
     enable_forbidden = bool(config.get("enable_forbidden_check"))
     if config.get("mode") == "forbidden_only":
         review_type_keys = []
-        headers = ["来源文件", "sheet / segment ID", "原始行号", "原文", "译文", "禁用词检查情况"]
+        headers = ["文件名", "sheet / segment ID", "原始行号", "原文", "译文", "禁用词检查情况"]
     elif config.get("mode") == "directional":
         review_type_keys = [item["key"] for item in config.get("review_types", [])]
-        headers = ["来源文件", "sheet / segment ID", "原始行号", "原文", "译文", "修改建议", *review_type_keys]
+        headers = ["文件名", "sheet / segment ID", "原始行号", "原文", "译文", "修改建议", *review_type_keys]
     else:
         review_type_keys = []
         headers = NORMAL_HEADERS

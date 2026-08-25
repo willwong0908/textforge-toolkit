@@ -7,6 +7,7 @@ from term_extractor_app.ai_review.review_service import (
     _build_packages,
     _validate_response_items,
 )
+from term_extractor_app.ai_review.output_service import NORMAL_HEADERS
 
 
 def _request_item(item_id: str) -> dict[str, str]:
@@ -24,6 +25,9 @@ def _response_item(item_id: str) -> dict[str, object]:
 
 
 class ReviewWorkflowValidationTests(unittest.TestCase):
+    def test_output_includes_filename_column(self) -> None:
+        self.assertEqual(NORMAL_HEADERS[0], "文件名")
+
     def test_packages_respect_item_and_character_limits(self) -> None:
         items = [_request_item(str(index)) for index in range(161)]
         packages = _build_packages(items, 1_000_000, max_items=80)

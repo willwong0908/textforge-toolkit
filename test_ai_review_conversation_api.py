@@ -14,7 +14,7 @@ from term_extractor_app.ai_review import cache_service, config, database, sessio
 from term_extractor_app.ai_review.conversation_routes import router
 
 
-def _workspace_response(messages: list[dict[str, str]]) -> str:
+def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     prompt = messages[-1]["content"]
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
     attachment_id = next(iter(manifests))
@@ -25,11 +25,14 @@ def _workspace_response(messages: list[dict[str, str]]) -> str:
             {"language": "简体中文", "mappings": [{"attachment_id": attachment_id, "scope": "table", "source_column_index": 0, "target_column_index": 1}]},
             {"language": "日语", "mappings": [{"attachment_id": attachment_id, "scope": "table", "source_column_index": 0, "target_column_index": 2}]},
         ]
-    return json.dumps({
+    response = json.dumps({
         "content_files": [attachment_id], "reference_files": [], "source_language": "英语",
         "targets": targets, "relationships": [], "assumptions": ["Workspace Agent 已确认映射。"],
         "warnings": [], "confidence": 0.97, "needs_input": False, "question": "",
     }, ensure_ascii=False)
+    if on_delta:
+        on_delta(response)
+    return response
 
 
 class ConversationApiTests(unittest.TestCase):
@@ -73,6 +76,16 @@ class ConversationApiTests(unittest.TestCase):
             files={"files": ("translations.csv", "Source,简体中文,日本語\nHello,你好,こんにちは\n", "text/csv")},
         )
         self.assertEqual(upload.status_code, 200)
+        uploaded_id = upload.json()["attachments"][0]["id"]
+        self.assertEqual(
+            self.client.get(f"/api/ai-review/conversations/{session_id}").json()["session"]["title"],
+            "translations.csv",
+        )
+        renamed = self.client.patch(
+            f"/api/ai-review/conversations/{session_id}", json={"title": "每日测验审校"}
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertTrue(renamed.json()["session"]["title_custom"])
         sent = self.client.post(
             f"/api/ai-review/conversations/{session_id}/messages",
             json={
@@ -91,6 +104,18 @@ class ConversationApiTests(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(snapshot["session"]["status"], "ready")
+        self.assertEqual(snapshot["session"]["title"], "每日测验审校")
+        self.assertIsNotNone(snapshot["attachments"][0]["sent_at"])
+        attachment_message = next(item for item in snapshot["messages"] if item["kind"] == "attachment_message")
+        self.assertEqual(attachment_message["payload"]["attachments"][0]["id"], uploaded_id)
+        opened = self.client.get(
+            f"/api/ai-review/conversations/{session_id}/attachments/{uploaded_id}/file"
+        )
+        self.assertEqual(opened.status_code, 200)
+        self.assertIn(b"Source", opened.content)
+        event_types = {item["event_type"] for item in session_store.get_events(session_id)}
+        self.assertIn("workspace.output_started", event_types)
+        self.assertIn("workspace.delta", event_types)
         plan = snapshot["workspace_runs"][0]["plan"]
         self.assertEqual({item["language"] for item in plan["targets"]}, {"简体中文", "日语"})
         self.assertEqual(len(snapshot["questions"]), 1)
@@ -130,6 +155,42 @@ class ConversationApiTests(unittest.TestCase):
             json={"confirm": False},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_pending_attachment_can_be_removed_and_source_can_be_none(self) -> None:
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        upload = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments",
+            files={"files": ("remove.csv", "Source,Target\nHello,你好\n", "text/csv")},
+        ).json()
+        attachment_id = upload["attachments"][0]["id"]
+        removed = self.client.delete(
+            f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}"
+        )
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/ai-review/conversations/{session_id}").json()["attachments"], []
+        )
+
+        self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments",
+            files={"files": ("translations.csv", "Source,简体中文,日本語\nHello,你好,こんにちは\n", "text/csv")},
+        )
+        sent = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/messages",
+            json={"source_language": "none", "target_languages": ["简体中文"]},
+        )
+        self.assertEqual(sent.status_code, 200)
+        snapshot = None
+        for _ in range(40):
+            snapshot = self.client.get(f"/api/ai-review/conversations/{session_id}").json()
+            if snapshot["session"]["status"] in {"ready", "needs_input", "failed"}:
+                break
+            time.sleep(0.05)
+        plan = snapshot["workspace_runs"][0]["plan"]
+        self.assertEqual(plan["source_language"], "none")
+        self.assertTrue(
+            all(not unit["source_text"] for target in plan["targets"] for unit in target["units"])
+        )
 
 
 if __name__ == "__main__":
