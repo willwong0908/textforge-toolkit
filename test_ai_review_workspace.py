@@ -219,7 +219,7 @@ class WorkspaceSessionTests(unittest.TestCase):
         self.assertEqual(plan["targets"][0]["units"][0]["target_language"], "中文")
         self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "")
 
-    def test_explicit_no_source_docx_expands_document_pointer_to_all_paragraphs(self) -> None:
+    def test_agent_no_source_docx_expands_document_pointer_to_all_paragraphs(self) -> None:
         docx_path = Path(self.temp.name) / "translation.docx"
         with zipfile.ZipFile(docx_path, "w") as archive:
             archive.writestr(
@@ -231,12 +231,14 @@ class WorkspaceSessionTests(unittest.TestCase):
             )
         session = session_store.create_session(source_language="auto", target_languages=["auto"])
         attachment = session_store.add_attachment(session["id"], "translation.docx", docx_path.read_bytes())
+        prompts: list[str] = []
 
         def document_plan(messages: list[dict[str, str]], on_delta=None) -> str:
+            prompts.append(messages[-1]["content"])
             response = json.dumps(
                 {
-                    "content_files": [attachment["id"]], "reference_files": [], "source_language": "auto",
-                    "targets": [{"language": "auto", "mappings": [{
+                    "content_files": [attachment["id"]], "reference_files": [], "source_language": "none",
+                    "targets": [{"language": "中文", "mappings": [{
                         "attachment_id": attachment["id"], "scope": "document",
                         "source_pointer": None, "target_pointer": "word/document.xml",
                     }]}],
@@ -255,12 +257,15 @@ class WorkspaceSessionTests(unittest.TestCase):
         ), patch(
             "term_extractor_app.ai_review.workspace_service.workspace_chat",
             side_effect=document_plan,
-        ):
+            ):
             plan = inspect_workspace_sync(
-                session["id"], adjustment_text="没有原文，全文都是中文译文，直接审校译文。"
+                session["id"], adjustment_text="我这里缺失源文，请根据文件内容判断是否可审校。"
             )
         self.assertFalse(plan["needs_input"])
         self.assertEqual(plan["source_language"], "none")
+        self.assertIn("缺失源文", prompts[-1])
+        self.assertIn("auto 表示交给你判断", prompts[-1])
+        self.assertNotIn("用户已明确要求无原文", prompts[-1])
         self.assertEqual([item["language"] for item in plan["targets"]], ["中文"])
         units = plan["targets"][0]["units"]
         self.assertEqual([item["target_text"] for item in units], ["第一段中文译文。", "第二段中文译文。"])

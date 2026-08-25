@@ -30,7 +30,8 @@ from ..telemetry import track_event
 
 WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent。你只负责理解文件结构和文件关系，不执行审校。
 根据结构清单判断正文、参考资料、原文位置和每种目标语言的译文位置。优先采用已有稳定指针，不要编造不存在的内容。
-如果用户指定源语言为 none，或用户明确说明“没有原文/只审校译文/不需要原文”，所有映射都必须把 source_column_index/source_pointer 设为空，并把 source_language 返回为 none，不得补造原文，也不能因此要求用户补充原文。
+约束优先级：用户本轮最新的自然语言说明 > 用户明确选择的具体语言/none > 界面中的 auto > 文件名和样例推测。auto 仅表示“请你自行判断”，绝不是用户坚持存在原文或某一源语言的约束；用户先前或界面中是 auto、随后说明“不用原文/全文是译文”时，应结合全文语义和文件结构判断，并可返回 source_language 为 none。不要按单个关键词机械判断，例如“缺失源文”可能是在描述问题而不是要求无原文审校。
+用户选择源语言为 none 时，所有映射都必须把 source_column_index/source_pointer 设为空，并把 source_language 返回为 none，不得补造原文。当你判断没有原文、只需要审校译文时，也必须显式返回 source_language 为 none，并让所有映射的 source_column_index/source_pointer 为空；不能因为没有原文就要求用户补充原文。
 对于 DOCX、PPTX、TXT、PDF、JSON、XML 等非表格正文，target_pointer 可以使用 "*" 表示该附件所有可读文本位置，也可以使用一个文档级指针前缀（例如 word/document.xml）；后端会展开为实际位置。DOCX/PPTX 必须保持 Reader 的段落/文本位置为独立审校单元，绝不能把整篇文档拼成一个审校条目。用户明确无原文时，应优先以这个方式生成可执行的全文译文审校方案。
 只有完全无法形成可执行提取方案时 needs_input 才能为 true。只返回严格 JSON，不要输出 Markdown。"""
 
@@ -45,27 +46,13 @@ WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单�
   "needs_input": false, "question": ""
 }}
 
-用户指定源语言：{source_language}
-用户指定目标语言：{target_languages}
-用户已明确要求无原文：{no_source_requested}
-用户本轮调整要求：{adjustment_text}
+界面源语言设置（auto 表示交给你判断，不是硬约束）：{source_language}
+界面目标语言设置：{target_languages}
+用户本轮最新说明（优先于 auto，必须结合整句话理解）：{adjustment_text}
 本轮待调整的上一版识别方案（只有用户从“其他：自行输入”补充时才提供；普通新消息为空）：
 {adjustment_context_json}
 结构清单：
 {manifest_json}"""
-
-_NO_SOURCE_PATTERN = re.compile(
-    r"(?:没有|无|不含|不存在|不需要|不用)\s*(?:原文|源文|source)",
-    re.IGNORECASE,
-)
-
-
-def _no_source_requested(session: dict[str, Any], adjustment: str = "") -> bool:
-    """Treat an explicit conversational instruction as stronger than source=auto."""
-    if str(session.get("source_language") or "").strip().lower() == "none":
-        return True
-    return bool(_NO_SOURCE_PATTERN.search(str(adjustment or "")))
-
 
 def submit_workspace_inspection(
     session_id: str,
@@ -231,7 +218,6 @@ def _inspect(
         return plan_data
 
     adjustment = adjustment_text.strip()
-    explicit_no_source = _no_source_requested(session, adjustment)
     content_documents = [document for document in documents.values() if document.role_hint != "reference"]
     xliff_local_only = (
         bool(content_documents)
@@ -270,27 +256,12 @@ def _inspect(
         )
         if refined is not None:
             plan = refined
-            if explicit_no_source:
-                _normalize_no_source_plan(plan, session)
-                if not plan.targets and candidate.targets:
-                    plan = candidate
-                    _normalize_no_source_plan(plan, session)
-                    plan.confidence = max(plan.confidence, 0.78)
-                    plan.assumptions.append(
-                        "Workspace Agent 未返回可展开的位置；已按用户明确的无原文要求，将全部可读正文作为译文审校内容。"
-                    )
             if adjustment:
                 plan.assumptions.append(f"Workspace Agent 已重新应用用户调整：{_short_sample(adjustment, 140)}")
         else:
             plan = candidate
             plan.confidence = min(plan.confidence, 0.49)
-            if explicit_no_source and plan.targets:
-                _normalize_no_source_plan(plan, session)
-                plan.confidence = max(plan.confidence, 0.72)
-                plan.needs_input = False
-                plan.question = ""
-                plan.assumptions.append("Workspace Agent 当前不可用，已按用户明确的无原文要求生成译文单列审校方案。")
-            elif adjustment:
+            if adjustment:
                 plan.needs_input = True
                 plan.question = "Workspace Agent 没有成功应用这条调整。请确认模型配置后重试，或明确到文件名、工作表以及原文/译文所在列。"
                 plan.warnings.append("本轮只保留本地候选映射供核对，未把它当作调整后的正式方案。")
@@ -472,29 +443,6 @@ def _normalize_direct_text_plan(
             plan.source_language = "none"
         plan.assumptions.append("直接输入内容已按文字脚本确定为待审校译文；没有原文时仅检查译文本身。")
 
-
-def _normalize_no_source_plan(plan: ExtractionPlan, session: dict[str, Any]) -> None:
-    """Make an explicit no-source decision executable and language-safe."""
-    selected_languages = list(session.get("target_languages") or ["auto"])
-    regrouped: dict[str, list[ReviewUnit]] = defaultdict(list)
-    order: list[str] = []
-    for target in plan.targets:
-        for unit in target.units:
-            language = _select_target_language(detect_language(unit.target_text), selected_languages)
-            unit.target_language = language
-            unit.source_text = ""
-            unit.metadata["source_pointer"] = ""
-            unit.metadata["source_column_index"] = None
-            if language not in regrouped:
-                order.append(language)
-            regrouped[language].append(unit)
-    plan.source_language = "none"
-    plan.targets = [TargetPlan(language=language, units=regrouped[language]) for language in order]
-    if plan.targets:
-        plan.needs_input = False
-        plan.question = ""
-
-
 def _build_preset_plan(
     session: dict[str, Any],
     documents: dict[str, ReaderDocument],
@@ -644,8 +592,11 @@ def _apply_natural_language_adjustment(
         attachment_id: tabular_documents[attachment_id]
         for attachment_id in (named_ids or list(tabular_documents))
     }
-    no_source = _no_source_requested(session, adjustment)
-    source_column = None if no_source else _find_adjustment_column(adjustment, ("原文", "源文", "source"))
+    source_column = (
+        None
+        if str(session.get("source_language") or "").strip().lower() == "none"
+        else _find_adjustment_column(adjustment, ("原文", "源文", "source"))
+    )
 
     language_labels = [
         "简体中文", "繁体中文", "英语", "英文", "日语", "韩语", "法语", "德语", "西班牙语",
@@ -814,7 +765,6 @@ def _refine_with_model(
     user_prompt = WORKSPACE_USER_PROMPT.format(
         source_language=session["source_language"],
         target_languages=json.dumps(session["target_languages"], ensure_ascii=False),
-        no_source_requested="是" if _no_source_requested(session, adjustment_text) else "否",
         adjustment_text=adjustment_text or "无",
         adjustment_context_json=json.dumps(
             _workspace_adjustment_context(session["id"], parent_run_id) if adjustment_text.strip() else {},
@@ -897,6 +847,7 @@ def _workspace_adjustment_context(session_id: str, parent_run_id: str) -> dict[s
 def _plan_from_agent(
     session_id: str, data: dict[str, Any], documents: dict[str, ReaderDocument]
 ) -> ExtractionPlan:
+    agent_declares_no_source = str(data.get("source_language") or "").strip().lower() == "none"
     block_maps = {
         attachment_id: {block.pointer: block for block in document.blocks}
         for attachment_id, document in documents.items()
@@ -920,6 +871,8 @@ def _plan_from_agent(
                     )
                 except (TypeError, ValueError):
                     continue
+                if agent_declares_no_source:
+                    source_column = None
                 scope = str(mapping.get("scope") or "")
                 mapped = _map_explicit_tabular_columns(
                     {"id": session_id, "target_languages": [language]},
@@ -932,7 +885,7 @@ def _plan_from_agent(
                 units.extend(mapped.get(language) or [])
                 continue
             target_pointer = str(mapping.get("target_pointer") or "")
-            source_pointer = str(mapping.get("source_pointer") or "")
+            source_pointer = "" if agent_declares_no_source else str(mapping.get("source_pointer") or "")
             source_block = block_maps.get(attachment_id, {}).get(source_pointer)
             target_blocks = _resolve_non_tabular_target_blocks(
                 document,
@@ -945,7 +898,11 @@ def _plan_from_agent(
                         id=uuid.uuid4().hex,
                         session_id=session_id,
                         target_language=language,
-                        source_text=source_block.text if source_block else str(target_block.metadata.get("source_text") or ""),
+                        source_text=(
+                            ""
+                            if agent_declares_no_source
+                            else source_block.text if source_block else str(target_block.metadata.get("source_text") or "")
+                        ),
                         target_text=target_block.text,
                         source_file=document.filename,
                         pointer=target_block.pointer,
