@@ -2975,7 +2975,6 @@ INDEX_HTML = """<!doctype html>
             <div><h3>审校结果预览</h3><p>每个目标语言独立审校并生成结果文件。</p></div>
             <div class="actions compact-actions">
               <div id="reviewTargetTabs" class="review-target-tabs"></div>
-              <button id="openReviewDetailButton" class="secondary" type="button" disabled>详情</button>
             </div>
           </div>
           <div class="review-inline-progress">
@@ -2995,9 +2994,13 @@ INDEX_HTML = """<!doctype html>
             <button id="openOutputDirButton" class="secondary" type="button">打开输出目录</button>
             <button id="openOutputFileButton" class="secondary" type="button" disabled>打开结果文件</button>
           </div>
+          <div class="review-result-preview-head">
+            <span>预览</span>
+            <button id="openReviewDetailButton" class="secondary" type="button" disabled>详情</button>
+          </div>
           <div class="pattern-table-wrap review-result-table-wrap">
             <table class="pattern-table review-result-table">
-              <thead id="reviewResultHead"><tr><th>文件名</th><th>原文</th><th>译文</th><th>是否有问题</th><th>问题类型</th><th>问题说明</th><th>修改建议</th></tr></thead>
+              <thead id="reviewResultHead"><tr><th>原文</th><th>译文</th><th>是否有问题</th><th>问题类型</th><th>问题说明</th><th>修改建议</th></tr></thead>
               <tbody id="reviewResultBody"><tr><td colspan="6" class="empty-cell">暂无审校结果</td></tr></tbody>
             </table>
           </div>
@@ -3085,15 +3088,8 @@ INDEX_HTML = """<!doctype html>
         </div>
         <button id="closeReviewDetailButton" class="modal-close" type="button" aria-label="关闭">×</button>
       </div>
-      <div class="pattern-table-wrap review-detail-wrap">
-        <table class="pattern-table review-detail-table">
-          <thead id="reviewDetailHead">
-            <tr><th>原文</th><th>原译文</th><th>修改建议</th></tr>
-          </thead>
-          <tbody id="reviewDetailBody">
-            <tr><td colspan="3" class="empty-cell">暂无问题条目</td></tr>
-          </tbody>
-        </table>
+      <div id="reviewDetailGroups" class="review-detail-wrap">
+        <div class="empty-cell">暂无问题条目</div>
       </div>
     </div>
   </div>
@@ -3954,12 +3950,26 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 }
 .review-result-table {
   width: 100%;
-  min-width: 100%;
+  min-width: 0;
   table-layout: fixed;
+}
+.review-result-table-wrap { overflow-x: hidden; }
+.review-result-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
 }
 .review-result-table th,
 .review-result-table td {
   min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .review-result-table th:nth-child(3),
 .review-result-table td:nth-child(3) {
@@ -3999,9 +4009,11 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   min-height: 0;
   max-height: none;
   overflow: auto;
+  padding: 0 2px 2px;
 }
 .review-detail-table {
-  min-width: 1280px;
+  width: 100%;
+  min-width: 0;
   table-layout: fixed;
 }
 .review-detail-table th:nth-child(1),
@@ -4029,6 +4041,35 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   white-space: normal;
   overflow-wrap: anywhere;
   line-height: 1.6;
+}
+.review-detail-group + .review-detail-group {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.review-detail-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 9px;
+}
+.review-detail-group-head h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.review-detail-group-head span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.review-detail-group-table-wrap {
+  overflow-x: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
 }
 .review-detail-issue-cell {
   position: relative;
@@ -7782,7 +7823,6 @@ function renderAiReviewResults(task, results) {
     let cells = [];
     if (isForbiddenOnly) {
       cells = [
-        item.source_file || "直接输入",
         item.source_text || "",
         item.target_text || "",
         item.matched_words || "",
@@ -7790,7 +7830,6 @@ function renderAiReviewResults(task, results) {
     } else if (isDirectional) {
       const checks = item.checks || {};
       cells = [
-        item.source_file || "直接输入",
         item.source_text || "",
         item.target_text || "",
         item.suggestion || "",
@@ -7801,7 +7840,6 @@ function renderAiReviewResults(task, results) {
       ];
     } else {
       cells = [
-        item.source_file || "直接输入",
         item.source_text || "",
         item.target_text || "",
         item.has_issue === null ? "" : item.has_issue ? "是" : "否",
@@ -7829,29 +7867,17 @@ function renderAiReviewResultHead(task) {
   const hasForbidden = Boolean(config.enable_forbidden_check);
   const reviewTypes = Array.isArray(config.review_types) ? config.review_types : [];
   const headers = isForbiddenOnly
-    ? ["文件名", "原文", "译文", "禁用词检查情况"]
+    ? ["原文", "译文", "禁用词检查情况"]
     : isDirectional
-      ? ["文件名", "原文", "译文", "修改建议", ...reviewTypes.map((item) => String(item?.key || ""))]
-      : ["文件名", "原文", "译文", "是否有问题", "问题类型", "问题说明", "修改建议"];
+      ? ["原文", "译文", "修改建议", ...reviewTypes.map((item) => String(item?.key || ""))]
+      : ["原文", "译文", "是否有问题", "问题类型", "问题说明", "修改建议"];
   if (hasForbidden && !isForbiddenOnly) {
     headers.push("禁用词检查情况");
   }
   const table = $("reviewResultBody").closest("table");
-  const textColumnWidth = 300;
-  const widths = isForbiddenOnly
-    ? [210, 420, 420, 300]
-    : isDirectional
-      ? [210, 320, 320, 320, ...reviewTypes.map(() => 240), ...(hasForbidden ? [240] : [])]
-      : [210, 300, 300, 88, 150, 260, 300, ...(hasForbidden ? [240] : [])];
-  table.style.minWidth = `${widths.reduce((total, width) => total + width, 0)}px`;
+  table.style.minWidth = "0";
+  table.style.width = "100%";
   table.querySelector("colgroup")?.remove();
-  const colgroup = document.createElement("colgroup");
-  widths.forEach((width, index) => {
-    const col = document.createElement("col");
-    col.style.width = `${width || textColumnWidth}px`;
-    colgroup.appendChild(col);
-  });
-  table.insertBefore(colgroup, table.firstChild);
   const head = $("reviewResultHead");
   head.innerHTML = "";
   const tr = document.createElement("tr");
@@ -7918,57 +7944,83 @@ function createReviewDiffCell(html, mode) {
 }
 
 function renderReviewDetailRows(task, results) {
-  const head = $("reviewDetailHead");
-  const body = $("reviewDetailBody");
+  const groups = $("reviewDetailGroups");
   const extraHeaders = reviewDetailExtraHeaders(task);
   const headers = ["原文", "原译文", "修改建议", ...extraHeaders];
-  head.innerHTML = "";
-  const headRow = document.createElement("tr");
-  headers.forEach((header) => {
-    const th = document.createElement("th");
-    th.textContent = header;
-    headRow.appendChild(th);
-  });
-  head.appendChild(headRow);
-
-  body.innerHTML = "";
   const items = Array.isArray(results) ? results : [];
   aiReviewIssueResults = items;
-  $("reviewDetailSummary").textContent = items.length ? `共 ${items.length} 条问题` : "暂无问题条目";
+  const grouped = new Map();
+  items.forEach((item) => {
+    const filename = String(item?.source_file || "直接输入").trim() || "直接输入";
+    if (!grouped.has(filename)) grouped.set(filename, []);
+    grouped.get(filename).push(item);
+  });
+  $("reviewDetailSummary").textContent = items.length
+    ? `共 ${items.length} 条问题 · ${grouped.size} 个文件`
+    : "暂无问题条目";
+  groups.innerHTML = "";
   if (!items.length) {
-    body.innerHTML = `<tr><td colspan="${headers.length}" class="empty-cell">暂无问题条目</td></tr>`;
+    groups.innerHTML = '<div class="empty-cell">暂无问题条目</div>';
     return;
   }
-  items.forEach((item) => {
-    const tr = document.createElement("tr");
-    const sourceTd = document.createElement("td");
-    sourceTd.textContent = String(item.source_text || "");
-    tr.appendChild(sourceTd);
+  grouped.forEach((fileItems, filename) => {
+    const section = document.createElement("section");
+    section.className = "review-detail-group";
+    const groupHead = document.createElement("div");
+    groupHead.className = "review-detail-group-head";
+    const title = document.createElement("h4");
+    title.textContent = filename;
+    const count = document.createElement("span");
+    count.textContent = `${fileItems.length} 条问题`;
+    groupHead.append(title, count);
+    section.appendChild(groupHead);
 
-    const tokens = buildDiffTokens(item.target_text || "", item.suggestion || "");
-    tr.appendChild(createReviewDiffCell(tokens.leftHtml, "delete"));
-    tr.appendChild(createReviewDiffCell(tokens.rightHtml, "add"));
-
-    const extraValues = reviewDetailExtraValues(task, item);
-    extraValues.forEach((value, index) => {
-      const td = document.createElement("td");
-      if (index === extraValues.length - 1) {
-        td.className = "review-detail-issue-cell";
-      }
-      td.textContent = String(value || "");
-      if (index === extraValues.length - 1) {
-        const followupButton = document.createElement("button");
-        followupButton.type = "button";
-        followupButton.className = "secondary review-followup-inline-button";
-        followupButton.textContent = "追问";
-        followupButton.addEventListener("click", () => openReviewFollowupDialog(item.id).catch((error) => {
-          $("reviewFollowupHint").textContent = error.message;
-        }));
-        td.appendChild(followupButton);
-      }
-      tr.appendChild(td);
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "review-detail-group-table-wrap";
+    const table = document.createElement("table");
+    table.className = "pattern-table review-detail-table";
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    headers.forEach((header) => {
+      const th = document.createElement("th");
+      th.textContent = header;
+      headRow.appendChild(th);
     });
-    body.appendChild(tr);
+    head.appendChild(headRow);
+    const body = document.createElement("tbody");
+    fileItems.forEach((item) => {
+      const tr = document.createElement("tr");
+      const sourceTd = document.createElement("td");
+      sourceTd.textContent = String(item.source_text || "");
+      tr.appendChild(sourceTd);
+
+      const tokens = buildDiffTokens(item.target_text || "", item.suggestion || "");
+      tr.appendChild(createReviewDiffCell(tokens.leftHtml, "delete"));
+      tr.appendChild(createReviewDiffCell(tokens.rightHtml, "add"));
+
+      const extraValues = reviewDetailExtraValues(task, item);
+      extraValues.forEach((value, index) => {
+        const td = document.createElement("td");
+        if (index === extraValues.length - 1) td.className = "review-detail-issue-cell";
+        td.textContent = String(value || "");
+        if (index === extraValues.length - 1) {
+          const followupButton = document.createElement("button");
+          followupButton.type = "button";
+          followupButton.className = "secondary review-followup-inline-button";
+          followupButton.textContent = "追问";
+          followupButton.addEventListener("click", () => openReviewFollowupDialog(item.id).catch((error) => {
+            $("reviewFollowupHint").textContent = error.message;
+          }));
+          td.appendChild(followupButton);
+        }
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    table.append(head, body);
+    tableWrap.appendChild(table);
+    section.append(tableWrap);
+    groups.appendChild(section);
   });
 }
 
