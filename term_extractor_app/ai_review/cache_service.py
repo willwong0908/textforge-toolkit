@@ -70,16 +70,17 @@ def replace_batch_items(
         metadata.update(metadata_update or {})
 
         conn.execute("DELETE FROM file_items WHERE batch_id = ?", (batch_id,))
-        for item in items:
-            conn.execute(
-                """
-                INSERT INTO file_items (
-                    id, batch_id, source_file, sheet_name, segment_id, row_number,
-                    source_text, target_text, info_json, source_column, target_column,
-                    status_note, item_order, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+        conn.executemany(
+            """
+            INSERT INTO file_items (
+                id, batch_id, source_file, sheet_name, segment_id, row_number,
+                source_text, target_text, info_json, source_column, target_column,
+                target_language, location_json, references_json,
+                status_note, item_order, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
                 (
                     uuid.uuid4().hex,
                     batch_id,
@@ -92,11 +93,16 @@ def replace_batch_items(
                     dumps_json(item.get("info", [])),
                     item.get("source_column"),
                     item.get("target_column"),
+                    item.get("target_language", ""),
+                    dumps_json(item.get("location", {})),
+                    dumps_json(item.get("references", [])),
                     item.get("status_note", ""),
                     item["item_order"],
                     now,
-                ),
-            )
+                )
+                for item in items
+            ],
+        )
         conn.execute(
             """
             UPDATE file_batches
@@ -204,6 +210,9 @@ def _item_to_dict(row: Any) -> dict[str, Any]:
         "info": loads_json(row["info_json"], []) if "info_json" in row.keys() else [],
         "source_column": row["source_column"] if "source_column" in row.keys() else None,
         "target_column": row["target_column"] if "target_column" in row.keys() else None,
+        "target_language": row["target_language"] if "target_language" in row.keys() else "",
+        "location": loads_json(row["location_json"], {}) if "location_json" in row.keys() else {},
+        "references": loads_json(row["references_json"], []) if "references_json" in row.keys() else [],
         "status_note": row["status_note"],
         "item_order": row["item_order"],
     }

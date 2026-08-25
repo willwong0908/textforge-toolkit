@@ -121,6 +121,7 @@ def save_prompt_template(
     name: str,
     system_prompt: str,
     user_prompt: str,
+    forbidden_words_text: str = "",
 ) -> dict[str, Any]:
     if "{text}" not in user_prompt:
         raise ValueError("用户提示词必须包含 {text} 占位符")
@@ -133,10 +134,10 @@ def save_prompt_template(
             conn.execute(
                 """
                 UPDATE prompt_templates
-                SET name = ?, system_prompt = ?, user_prompt = ?, updated_at = ?
+                SET name = ?, system_prompt = ?, user_prompt = ?, forbidden_words_text = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (name, system_prompt, user_prompt, now, template_id),
+                (name, system_prompt, user_prompt, str(forbidden_words_text or ""), now, template_id),
             )
             saved_id = template_id
         else:
@@ -144,11 +145,11 @@ def save_prompt_template(
             conn.execute(
                 """
                 INSERT INTO prompt_templates (
-                    id, name, system_prompt, user_prompt, is_default, created_at, updated_at
+                    id, name, system_prompt, user_prompt, forbidden_words_text, is_default, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
                 """,
-                (saved_id, name, system_prompt, user_prompt, now, now),
+                (saved_id, name, system_prompt, user_prompt, str(forbidden_words_text or ""), now, now),
             )
     return get_prompt_template(saved_id)
 
@@ -169,6 +170,7 @@ def _template_to_dict(row: Any) -> dict[str, Any]:
         "name": row["name"],
         "system_prompt": row["system_prompt"],
         "user_prompt": row["user_prompt"],
+        "forbidden_words_text": row["forbidden_words_text"] if "forbidden_words_text" in row.keys() else "",
         "is_default": bool(row["is_default"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],

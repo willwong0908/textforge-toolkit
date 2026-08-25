@@ -31,6 +31,7 @@ if __package__:
     )
     from .ai_review.config import OUTPUTS_DIR as AI_REVIEW_OUTPUTS_DIR
     from .ai_review.database import init_db as init_ai_review_db
+    from .ai_review.conversation_routes import router as ai_review_conversation_router
     from .ai_review.directional_service import (
         delete_directional_template,
         get_directional_template,
@@ -133,6 +134,7 @@ else:
     )
     from term_extractor_app.ai_review.config import OUTPUTS_DIR as AI_REVIEW_OUTPUTS_DIR
     from term_extractor_app.ai_review.database import init_db as init_ai_review_db
+    from term_extractor_app.ai_review.conversation_routes import router as ai_review_conversation_router
     from term_extractor_app.ai_review.directional_service import (
         delete_directional_template,
         get_directional_template,
@@ -255,6 +257,9 @@ class SettingsPayload(BaseModel):
     term_review_batch_char_limit: Optional[int] = None
     term_review_max_context_chars: Optional[int] = None
     ai_review_batch_char_limit: Optional[int] = None
+    ai_review_max_items_per_request: Optional[int] = None
+    ai_review_workspace_enable_thinking: Optional[bool] = None
+    ai_review_debug_payload_logging: Optional[bool] = None
     nontrans_enable_thinking: Optional[bool] = None
     term_recall_enable_thinking: Optional[bool] = None
     term_review_enable_thinking: Optional[bool] = None
@@ -395,6 +400,7 @@ class AIReviewPromptTemplateSavePayload(BaseModel):
     name: str
     system_prompt: str
     user_prompt: str
+    forbidden_words_text: str = ""
 
 
 class AIReviewDirectionalTemplateSavePayload(BaseModel):
@@ -993,6 +999,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
     diff_task_service = DiffTaskService()
     app = FastAPI(title="AI Term Extractor WebUI")
     init_ai_review_db()
+    app.include_router(ai_review_conversation_router)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -1184,6 +1191,13 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             ai_review["batch_request_char_limit"] = int(payload.ai_review_batch_char_limit)
         if payload.ai_review_enable_thinking is not None:
             ai_review["enable_thinking"] = bool(payload.ai_review_enable_thinking)
+        if payload.ai_review_max_items_per_request is not None:
+            ai_review["max_items_per_request"] = max(1, int(payload.ai_review_max_items_per_request))
+        if payload.ai_review_workspace_enable_thinking is not None:
+            ai_review["workspace_enable_thinking"] = bool(payload.ai_review_workspace_enable_thinking)
+        if payload.ai_review_debug_payload_logging is not None:
+            ai_review["debug_payload_logging"] = bool(payload.ai_review_debug_payload_logging)
+        ai_review.pop("workspace_model", None)
         settings.input_defaults["ai_review_stage_settings"] = ai_review
 
         task_facade.save_settings(settings)
@@ -1836,6 +1850,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
                 name=payload.name.strip() or "未命名模板",
                 system_prompt=payload.system_prompt,
                 user_prompt=payload.user_prompt,
+                forbidden_words_text=payload.forbidden_words_text,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2183,7 +2198,6 @@ INDEX_HTML = """<!doctype html>
           <div class="nav-submenu">
             <button class="nav-link nav-link-sub" data-page-target="aiReviewTaskPage">审校任务</button>
             <button class="nav-link nav-link-sub" data-page-target="aiReviewSettingsPage">审校设置</button>
-            <button class="nav-link nav-link-sub" data-page-target="aiReviewForbiddenPage">禁用词</button>
           </div>
         </details>
 
@@ -2814,189 +2828,129 @@ INDEX_HTML = """<!doctype html>
       </div>
 
       <section id="aiReviewTaskPage" class="page-section">
-        <div class="grid dashboard-grid">
-          <section class="card">
-            <div class="card-title">
-              <h3>读取文件</h3>
-              <p>支持 Excel 与 XLIFF。读取后可预览前 5 条并开始审校。</p>
+        <div class="review-conversation-shell">
+          <aside class="review-session-sidebar">
+            <button id="newReviewConversationButton" class="primary review-new-chat" type="button">＋ 新建审校</button>
+            <div id="reviewConversationList" class="review-conversation-list"></div>
+          </aside>
+          <div class="review-conversation-main">
+            <div class="review-conversation-head">
+              <div>
+                <h3 id="reviewConversationTitle">新审校</h3>
+                <p id="reviewConversationStatus">添加文件或直接输入待审校文本</p>
+              </div>
+              <div class="actions compact-actions">
+                <label class="check-line"><input id="reviewAutoStart" type="checkbox" /><span>识别后自动开始</span></label>
+                <button id="deleteReviewConversationButton" class="secondary danger-text" type="button">删除会话</button>
+              </div>
             </div>
-            <div class="grid two">
-              <div class="field">
-                <span class="field-label">当前文件</span>
-                <div class="file-card-row">
-                  <div id="reviewFilePath" class="file-card empty">请选择待审校文件</div>
-                  <button id="chooseReviewFileButton" class="mini-button" type="button">选择文件</button>
-                  <input id="reviewFileInput" type="file" accept=".xlsx,.xlsm,.xlf,.xliff" hidden />
+            <div id="reviewConversationMessages" class="review-conversation-messages"></div>
+            <div id="reviewComposer" class="review-composer">
+              <div id="reviewAttachmentChips" class="review-attachment-chips"></div>
+              <textarea id="reviewComposerInput" rows="3" placeholder="输入待审校文本，或拖拽多个文件到这里…"></textarea>
+              <div class="review-composer-footer">
+                <div class="review-composer-tools">
+                  <button id="reviewPromptChip" class="composer-chip" type="button">提示词</button>
+                  <button id="reviewSourceLanguageChip" class="composer-chip" type="button">源语言：自动</button>
+                  <button id="reviewTargetLanguageChip" class="composer-chip" type="button">目标语言：自动</button>
+                  <button id="reviewUploadChip" class="composer-chip" type="button">＋ 文件</button>
+                  <input id="reviewConversationFileInput" type="file" accept=".xlsx,.xlsm,.xlf,.xliff,.csv,.tsv,.txt,.md,.docx,.pptx,.pdf,.json,.xml" multiple hidden />
                 </div>
+                <button id="sendReviewConversationButton" class="primary review-send-button" type="button">发送</button>
               </div>
-              <div class="cross-summary-box">
-                <span>读取状态</span>
-                <strong id="reviewBatchCount">0</strong>
-                <small id="reviewFileHint">尚未读取文件。</small>
+              <div id="reviewLanguagePopover" class="review-language-popover hidden" role="dialog" aria-label="选择语言">
+                <div class="review-language-popover-head">
+                  <button id="closeReviewLanguagePopoverButton" class="review-language-back" type="button" aria-label="收起语言列表">‹</button>
+                  <strong id="reviewLanguagePopoverTitle">选择语言</strong>
+                  <span id="reviewLanguagePopoverHint">单选</span>
+                </div>
+                <div class="review-language-search-wrap">
+                  <span>⌕</span><input id="reviewLanguageSearch" type="search" placeholder="搜索语言" autocomplete="off" />
+                </div>
+                <div id="reviewLanguageOptions" class="review-language-options"></div>
               </div>
+              <span id="reviewConversationHint" class="hint"></span>
             </div>
-            <div class="actions">
-              <button id="openExcelMappingButton" class="secondary" type="button" disabled>导入文本</button>
-            </div>
-            <p id="excelMappingSummary" class="hint"></p>
-          </section>
+          </div>
         </div>
 
-        <div class="grid dashboard-grid">
-          <section class="card">
-            <div class="card-title">
-              <h3>读取预览</h3>
-              <p>预览前 5 条，检查原文和译文是否对应。</p>
-            </div>
-            <div class="pattern-table-wrap review-input-table-wrap">
-              <table class="pattern-table review-input-table">
-                <colgroup>
-                  <col class="review-input-file-column" />
-                  <col class="review-input-location-column" />
-                  <col class="review-input-row-column" />
-                  <col class="review-input-text-column" />
-                  <col class="review-input-text-column" />
-                  <col class="review-input-hint-column" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th>来源文件</th>
-                    <th>sheet / segment ID</th>
-                    <th>原始行号</th>
-                    <th>原文</th>
-                    <th>译文</th>
-                    <th>提示</th>
-                  </tr>
-                </thead>
-                <tbody id="previewBody">
-                  <tr><td colspan="6" class="empty-cell">暂无预览</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-
-        <div class="grid dashboard-grid">
-          <section class="card">
-            <div class="card-title">
-              <h3>任务操作</h3>
-              <p>确认预览无误后开始审校。</p>
-            </div>
-            <div class="grid two hidden">
-              <label>原文语种<input id="sourceLanguageInput" placeholder="例如 English" /></label>
-              <label>译文语种<input id="targetLanguageInput" placeholder="例如 简体中文" /></label>
-            </div>
-            <div class="actions">
-              <button id="startReviewButton" class="primary" type="button">开始审校</button>
-              <button id="openReviewSettingsButton" class="secondary" type="button">打开审校设置</button>
-              <button id="openReviewForbiddenButton" class="secondary" type="button">打开禁用词</button>
-            </div>
-            <span id="reviewTaskHint" class="hint"></span>
-          </section>
-
-          <section class="card">
-            <div class="card-title">
-              <h3>审校进度</h3>
-              <p id="reviewProgress">尚未开始</p>
-            </div>
-            <div class="metrics hero-metrics">
-              <div><span>进度</span><strong id="reviewProgressPercent">未开始</strong></div>
-              <div><span>已处理</span><strong id="reviewProgressCount">0 / 0</strong></div>
-              <div><span>失败</span><strong id="reviewFailedCount">0</strong></div>
-              <div><span>请求</span><strong id="reviewRequestedCount">0</strong></div>
-            </div>
-            <div class="progress"><span id="reviewProgressBar"></span></div>
-            <div id="outputPanel" class="result-file hidden">
-              <span>结果文件</span>
-              <strong id="outputPath">暂无输出</strong>
-            </div>
-            <div class="actions">
-              <button id="openOutputDirButton" class="secondary" type="button">打开输出目录</button>
-              <button id="openOutputFileButton" class="secondary" type="button" disabled>打开结果文件</button>
-            </div>
-            <div class="review-log-wrap">
-              <ol id="reviewLogList" class="review-log-list"></ol>
-            </div>
-          </section>
-        </div>
-
-        <section class="card">
+        <section id="reviewConversationResultCard" class="card review-conversation-results hidden">
           <div class="card-title">
-            <div>
-              <h3>审校结果预览</h3>
-              <p>展示前 20 条结果，完整结果会自动保存为 Excel。</p>
+            <div><h3>审校结果预览</h3><p>每个目标语言独立审校并生成结果文件。</p></div>
+            <div class="actions compact-actions">
+              <div id="reviewTargetTabs" class="review-target-tabs"></div>
+              <button id="openReviewDetailButton" class="secondary" type="button" disabled>详情</button>
             </div>
-            <button id="openReviewDetailButton" class="secondary" type="button" disabled>详情</button>
+          </div>
+          <div class="review-inline-progress">
+            <span id="reviewProgress">尚未开始</span>
+            <strong id="reviewProgressCount">0 / 0</strong>
+            <div class="progress"><span id="reviewProgressBar"></span></div>
+            <span id="reviewFailedCount" class="hidden">0</span>
+            <span id="reviewRequestedCount" class="hidden">0</span>
+            <span id="reviewProgressPercent" class="hidden">未开始</span>
+          </div>
+          <div id="outputPanel" class="result-file hidden"><span>结果文件</span><strong id="outputPath">暂无输出</strong></div>
+          <div class="actions">
+            <button id="openOutputDirButton" class="secondary" type="button">打开输出目录</button>
+            <button id="openOutputFileButton" class="secondary" type="button" disabled>打开结果文件</button>
           </div>
           <div class="pattern-table-wrap review-result-table-wrap">
             <table class="pattern-table review-result-table">
-              <thead id="reviewResultHead">
-                <tr>
-                  <th>原文</th>
-                  <th>译文</th>
-                  <th>是否有问题</th>
-                  <th>问题类型</th>
-                  <th>问题说明</th>
-                  <th>修改建议</th>
-                </tr>
-              </thead>
-              <tbody id="reviewResultBody">
-                <tr><td colspan="6" class="empty-cell">暂无审校结果</td></tr>
-              </tbody>
+              <thead id="reviewResultHead"><tr><th>原文</th><th>译文</th><th>是否有问题</th><th>问题类型</th><th>问题说明</th><th>修改建议</th></tr></thead>
+              <tbody id="reviewResultBody"><tr><td colspan="6" class="empty-cell">暂无审校结果</td></tr></tbody>
             </table>
           </div>
         </section>
+
+        <div class="hidden" aria-hidden="true">
+          <div id="reviewFilePath"></div><button id="chooseReviewFileButton" type="button"></button>
+          <input id="reviewFileInput" type="file" /><button id="openExcelMappingButton" type="button"></button>
+          <div id="reviewBatchCount"></div><div id="reviewFileHint"></div><div id="excelMappingSummary"></div>
+          <table><tbody id="previewBody"></tbody></table><input id="sourceLanguageInput" /><input id="targetLanguageInput" />
+          <button id="startReviewButton" type="button"></button><button id="openReviewSettingsButton" type="button"></button>
+          <button id="openReviewForbiddenButton" type="button"></button><span id="reviewTaskHint"></span><ol id="reviewLogList"></ol>
+        </div>
+
       </section>
 
       <section id="aiReviewSettingsPage" class="page-section">
         <div class="grid one">
           <section class="card">
             <div class="card-title">
-              <h3>审校方式</h3>
-              <p>选择审校模式、提示词模板和模型思考深度。</p>
+              <h3>Agent 与 Workflow</h3>
+              <p>Workspace Agent 与 Task Workflow 统一使用“模型设置”中的当前模型和 API 配置。</p>
             </div>
             <div class="actions review-toggle-row">
-              <label class="check-line"><input id="enableAiReview" type="checkbox" checked /><span>启用 AI 审校</span></label>
-              <label id="directionalReviewLine" class="check-line"><input id="enableDirectionalReview" type="checkbox" /><span>启用定向审校</span></label>
-              <label class="check-line"><input id="reviewAiThinking" type="checkbox" /><span>深度思考</span></label>
+              <label class="check-line"><input id="reviewAiThinking" type="checkbox" /><span>Workflow 深度思考</span></label>
+              <label class="check-line"><input id="reviewWorkspaceThinking" type="checkbox" /><span>Workspace 深度思考</span></label>
+              <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
             </div>
             <div class="grid two">
-              <label>提示词模板<select id="promptTemplateSelect"></select></label>
-              <label id="directionalTemplatePanel" class="hidden">定向审校模板<select id="directionalTemplateSelect"></select></label>
-              <label>单次请求字符上限<input id="reviewAiLimit" type="number" min="200" value="3000" /></label>
+              <label>单包字符预算<input id="reviewAiLimit" type="number" min="500" value="6000" /></label>
+              <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="80" /></label>
             </div>
             <div class="actions">
-              <button id="editPromptButton" class="secondary" type="button">编辑提示词</button>
-              <button id="editDirectionalButton" class="secondary" type="button">编辑定向</button>
+              <button id="saveReviewAgentSettingsButton" class="primary" type="button">保存设置</button>
             </div>
             <div class="notice-list">
-              <div>定向审校会按所选项目生成结果列。</div>
-              <div>模型连接请在“模型设置”中调整。</div>
+              <div>并发上限直接使用当前 Provider 的真实并发配置。</div>
+              <div>调试请求内容默认关闭，避免大量日志拖慢任务。</div>
             </div>
             <span id="reviewSettingsHint" class="hint"></span>
+            <div class="hidden" aria-hidden="true">
+              <input id="enableAiReview" type="checkbox" checked /><input id="enableDirectionalReview" type="checkbox" />
+              <span id="directionalReviewLine"></span><select id="promptTemplateSelect"></select>
+              <span id="directionalTemplatePanel"><select id="directionalTemplateSelect"></select></span>
+              <button id="editPromptButton" type="button"></button><button id="editDirectionalButton" type="button"></button>
+            </div>
           </section>
         </div>
       </section>
 
-      <section id="aiReviewForbiddenPage" class="page-section">
-        <div class="grid dashboard-grid">
-          <section class="card">
-            <div class="card-title">
-              <h3>禁用词开关</h3>
-              <p>禁用词会在译文中直接检查命中内容，可与 AI 审校一起使用。</p>
-            </div>
-            <div class="actions review-toggle-row">
-              <label class="check-line"><input id="enableForbiddenCheck" type="checkbox" /><span>启用禁用词</span></label>
-            </div>
-            <div class="grid one">
-              <label id="forbiddenTemplatePanel">禁用词模板<select id="forbiddenTemplateSelect"></select></label>
-            </div>
-            <div class="actions">
-              <button id="editForbiddenButton" class="secondary" type="button">编辑禁用词</button>
-            </div>
-            <span id="reviewForbiddenHint" class="hint"></span>
-          </section>
-        </div>
+      <section id="aiReviewForbiddenPage" class="page-section hidden" aria-hidden="true">
+        <input id="enableForbiddenCheck" type="checkbox" /><span id="forbiddenTemplatePanel"><select id="forbiddenTemplateSelect"></select></span>
+        <button id="editForbiddenButton" type="button"></button><span id="reviewForbiddenHint"></span>
       </section>
 
     </main>
@@ -3084,6 +3038,10 @@ INDEX_HTML = """<!doctype html>
       </div>
       <input id="promptTemplateId" type="hidden" />
       <div class="field">
+        <label for="promptDialogTemplateSelect">当前模板</label>
+        <select id="promptDialogTemplateSelect"></select>
+      </div>
+      <div class="field">
         <label for="promptNameInput">模板名</label>
         <input id="promptNameInput" type="text" />
       </div>
@@ -3094,6 +3052,10 @@ INDEX_HTML = """<!doctype html>
       <div class="field">
         <label for="userPromptInput">用户提示词</label>
         <textarea id="userPromptInput" rows="10"></textarea>
+      </div>
+      <div class="field">
+        <label for="promptForbiddenWordsInput">禁用词（可选，每行一个）</label>
+        <textarea id="promptForbiddenWordsInput" rows="5" placeholder="命中内容会由本地规则检查，不交给模型判断"></textarea>
       </div>
       <div class="dialog-actions">
         <button id="savePromptButton" type="button">保存模板</button>
@@ -4810,6 +4772,67 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .feedback-log-actions {
   justify-content: flex-start;
 }
+.review-conversation-shell {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  min-height: calc(100vh - 190px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.review-session-sidebar { padding: 14px; border-right: 1px solid var(--line); background: rgba(20, 29, 48, 0.025); }
+.review-new-chat { width: 100%; }
+.review-conversation-list { display: grid; gap: 7px; margin-top: 14px; }
+.review-session-item { width: 100%; text-align: left; padding: 10px 11px; border: 0; border-radius: 10px; background: transparent; color: var(--text); }
+.review-session-item:hover, .review-session-item.active { background: rgba(48, 111, 214, 0.10); }
+.review-session-item strong, .review-session-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-session-item span { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.review-conversation-main { display: grid; grid-template-rows: auto minmax(300px, 1fr) auto; min-width: 0; }
+.review-conversation-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 20px; border-bottom: 1px solid var(--line); }
+.review-conversation-head h3, .review-conversation-head p { margin: 0; }
+.review-conversation-head p { margin-top: 4px; color: var(--muted); font-size: 13px; }
+.review-conversation-messages { padding: 24px max(24px, 8%); overflow: auto; display: flex; flex-direction: column; gap: 18px; }
+.review-chat-message { max-width: min(820px, 88%); white-space: pre-wrap; line-height: 1.65; }
+.review-chat-message.user { align-self: flex-end; padding: 11px 15px; border-radius: 16px 16px 4px 16px; background: rgba(48, 111, 214, 0.12); }
+.review-chat-message.assistant { align-self: flex-start; }
+.review-chat-message.workspace-report { width: min(900px, 96%); padding: 16px 18px; border: 1px solid rgba(31, 111, 104, 0.18); border-radius: 16px; background: linear-gradient(180deg, #fbfefd 0%, #f5faf9 100%); box-shadow: 0 6px 20px rgba(23, 55, 70, 0.04); font-size: 13px; }
+.review-chat-message.error { color: var(--danger); }
+.review-chat-message-meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.review-decision-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.review-decision-actions input { width: min(420px, 100%); min-width: 220px; flex: 1 1 280px; }
+.review-decision-actions button { flex: 0 0 auto; }
+.review-composer { position: relative; margin: 0 max(24px, 8%) 22px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--panel); box-shadow: 0 10px 34px rgba(20, 30, 50, 0.08); }
+.review-composer.dragging { border-color: var(--primary); background: rgba(48, 111, 214, 0.04); }
+.review-composer textarea { width: 100%; border: 0; resize: vertical; min-height: 64px; box-shadow: none; background: transparent; }
+.review-composer textarea:focus { outline: 0; }
+.review-composer-footer { display: flex; justify-content: space-between; gap: 12px; align-items: flex-end; }
+.review-composer-tools, .review-attachment-chips, .review-target-tabs { display: flex; flex-wrap: wrap; gap: 7px; }
+.composer-chip, .review-attachment-chip, .review-target-tab { padding: 7px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 12px; }
+.composer-chip:hover { border-color: rgba(31, 111, 104, 0.42); background: #f7fbfa; }
+.review-attachment-chip { background: rgba(30, 148, 96, 0.08); }
+.review-target-tab.active { color: white; background: var(--primary); border-color: var(--primary); }
+.review-send-button { min-width: 68px; border-radius: 999px; }
+.review-conversation-results { margin-top: 18px; }
+.review-inline-progress { display: grid; grid-template-columns: auto auto minmax(120px, 1fr); align-items: center; gap: 12px; margin-bottom: 14px; }
+.review-language-popover { position: absolute; z-index: 30; bottom: 56px; left: 14px; width: min(650px, calc(100% - 28px)); overflow: hidden; border: 1px solid #d9e1ea; border-radius: 14px; background: #fff; box-shadow: 0 18px 50px rgba(29, 43, 68, 0.18); }
+.review-language-popover-head { display: grid; grid-template-columns: 32px 1fr auto; align-items: center; gap: 8px; padding: 11px 14px 8px; }
+.review-language-popover-head strong { font-size: 14px; }
+.review-language-popover-head span { color: var(--muted); font-size: 12px; }
+.review-language-back { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #56647a; font-size: 25px; line-height: 1; }
+.review-language-back:hover { background: #f0f3f7; }
+.review-language-search-wrap { display: flex; align-items: center; gap: 8px; padding: 0 15px 10px; border-bottom: 1px solid #e4e9ef; color: #6c788a; }
+.review-language-search-wrap input { width: 100%; padding: 7px 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.review-language-search-wrap input:focus { outline: 0; }
+.review-language-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px 14px; max-height: 330px; overflow: auto; padding: 9px; }
+.review-language-option { position: relative; display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 7px 10px; border: 0; border-radius: 4px; color: #26354a; cursor: pointer; user-select: none; }
+.review-language-option:hover { background: #f3f6fa; }
+.review-language-option.selected { color: #1769d2; background: #e8f0fe; }
+.review-language-option input { position: absolute; opacity: 0; pointer-events: none; }
+.review-language-check { width: 14px; color: #1769d2; font-weight: 800; visibility: hidden; }
+.review-language-option.selected .review-language-check { visibility: visible; }
+.danger-text { color: var(--danger); }
+.compact-actions { align-items: center; }
 @media (max-width: 980px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { position: static; }
@@ -4822,6 +4845,12 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   .mapping-template-bar { grid-template-columns: 1fr auto; }
   .mapping-template-bar label { grid-column: 1 / -1; }
   .mapping-template-bar .secondary { grid-column: 1 / 2; }
+  .review-conversation-shell { grid-template-columns: 1fr; }
+  .review-session-sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+  .review-conversation-list { display: flex; overflow-x: auto; }
+  .review-session-item { min-width: 180px; }
+  .review-language-popover { width: calc(100% - 20px); left: 10px !important; }
+  .review-language-options { grid-template-columns: 1fr 1fr; }
 }
 """
 
@@ -4892,6 +4921,23 @@ let aiReviewActiveSheetName = "";
 let aiReviewMappingTemplateIssues = [];
 let aiReviewIssueResults = [];
 let aiReviewFollowupState = { taskId: "", resultId: "", item: null, messages: [] };
+let reviewConversationState = {
+  sessions: [],
+  currentId: "",
+  snapshot: null,
+  eventSource: null,
+  refreshTimer: null,
+  sourceLanguage: "auto",
+  targetLanguages: ["auto"],
+  promptTemplateId: "",
+  languageMode: "source",
+  activeTarget: "",
+};
+const reviewLanguages = [
+  "自动检测", "简体中文", "繁体中文", "英语", "日语", "韩语", "法语", "德语", "西班牙语", "葡萄牙语",
+  "意大利语", "俄语", "阿拉伯语", "泰语", "越南语", "印尼语", "土耳其语", "波兰语", "荷兰语", "瑞典语",
+  "挪威语", "丹麦语", "芬兰语", "捷克语", "匈牙利语", "罗马尼亚语", "希腊语", "希伯来语", "乌克兰语",
+];
 const TASK_STATUS_BY_PAGE = {
   overviewPage: {
     taskLabel: "文本预处理工具",
@@ -4969,7 +5015,7 @@ const PAGE_HERO_COPY = {
   diffExcelPage: { title: "Excel差异比对", lede: "对比两个 Excel 文件或目录，查看差异、导出结果并批量标记。" },
   crossExcelPage: { title: "跨Excel搜索与合并", lede: "跨文件搜索整行内容，并按表头合并结果。" },
   aiReviewTaskPage: { title: "审校任务", lede: "导入文件、确认映射、查看预览并启动审校任务。" },
-  aiReviewSettingsPage: { title: "审校设置", lede: "管理 AI 审校方式、定向审校模板与深度思考。" },
+  aiReviewSettingsPage: { title: "审校设置", lede: "管理 Workflow 参数、阶段深度思考与调试选项。" },
   aiReviewForbiddenPage: { title: "禁用词", lede: "单独管理禁用词开关与禁用词模板。" },
 };
 const PAGE_ACCORDION_KEYS = {
@@ -4998,10 +5044,10 @@ const TOOL_GUIDES = {
   aiReview: {
     title: "AI 审校工具",
     sections: [
-      ["用途", "检查译文相对原文是否存在问题，适合做翻译质检、定向问题检查和禁用词检查。"],
-      ["适合处理", ["Excel 双语表", "XLIFF 文件", "需要按问题类型输出审校结果的项目"]],
-      ["基本用法", ["进入“AI 审校工具”，导入待审校文件。", "Excel 文件需要先确认原文列和译文列；XLIFF 会自动读取。", "在“审校设置”中选择普通审校或定向审校。", "点击“开始审校”，完成后打开结果文件。"]],
-      ["常用设置", ["单次请求字符上限：控制每次发给模型的文本长度。", "深度思考：用于更复杂的审校，但会更慢。", "禁用词：单独检查译文中是否出现指定词。"]],
+      ["用途", "由 Workspace Agent 自动理解文件结构和文件关系，再按目标语言分别执行翻译审校与严格校验。"],
+      ["适合处理", ["Excel、XLIFF、CSV 等双语文件", "只有译文的文档或直接粘贴文本", "多文件参考资料与多目标语言项目"]],
+      ["基本用法", ["进入“AI 审校工具”，拖入一个或多个文件，也可以直接输入待审校文本。", "选择提示词、源语言和目标语言后发送。", "检查 Workspace Agent 的识别报告；默认确认后开始审校。", "首批结果会实时显示在会话下方，完成后可打开独立结果文件。"]],
+      ["常用设置", ["模型与 API：统一使用工具“模型设置”中的当前配置。", "并发与分包：控制审校速度和单次响应规模。", "禁用词：关联在提示词模板中，由本地确定性规则检查。"]],
     ],
   },
   crossExcel: {
@@ -5912,9 +5958,16 @@ function updateAiReviewModeVisibility() {
 function renderAiReviewPromptTemplateOptions() {
   const select = $("promptTemplateSelect");
   select.innerHTML = "";
+  const dialogSelect = $("promptDialogTemplateSelect");
+  if (dialogSelect) dialogSelect.innerHTML = "";
   aiReviewPromptTemplates.forEach((item) => {
     select.appendChild(new Option(String(item.name || ""), String(item.id || "")));
+    if (dialogSelect) dialogSelect.appendChild(new Option(String(item.name || ""), String(item.id || "")));
   });
+  if (!reviewConversationState.promptTemplateId && aiReviewPromptTemplates.length) {
+    reviewConversationState.promptTemplateId = String(aiReviewPromptTemplates[0].id || "");
+  }
+  if ($("reviewPromptChip")) updateReviewComposerChips();
 }
 
 function renderAiReviewDirectionalTemplateOptions() {
@@ -6358,6 +6411,8 @@ function fillAiReviewPromptDialog(template = {}) {
   $("promptNameInput").value = String(template.name || "");
   $("systemPromptInput").value = String(template.system_prompt || "");
   $("userPromptInput").value = String(template.user_prompt || "");
+  $("promptForbiddenWordsInput").value = String(template.forbidden_words_text || "");
+  $("promptDialogTemplateSelect").value = String(template.id || "");
   $("deletePromptButton").disabled = Boolean(template.is_default) || !template.id;
 }
 
@@ -6377,6 +6432,7 @@ function newAiReviewPromptTemplate() {
     name: "新建模板",
     system_prompt: "",
     user_prompt: "{text}",
+    forbidden_words_text: "",
     is_default: false,
   });
 }
@@ -6389,10 +6445,13 @@ async function saveAiReviewPromptTemplate() {
       name: $("promptNameInput").value || "未命名模板",
       system_prompt: $("systemPromptInput").value,
       user_prompt: $("userPromptInput").value,
+      forbidden_words_text: $("promptForbiddenWordsInput").value,
     }),
   });
   await loadAiReviewPromptTemplates();
   $("promptTemplateSelect").value = String(data?.template?.id || "");
+  reviewConversationState.promptTemplateId = String(data?.template?.id || reviewConversationState.promptTemplateId || "");
+  updateReviewComposerChips();
   $("promptDialog").close();
   $("reviewSettingsHint").textContent = data.message || "提示词模板已保存";
 }
@@ -6892,6 +6951,350 @@ async function loadAiReviewForbiddenTemplates() {
   renderAiReviewForbiddenTemplateOptions();
 }
 
+async function loadReviewConversations(preferredId = "") {
+  const data = await api("/api/ai-review/conversations");
+  reviewConversationState.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  renderReviewConversationList();
+  let nextId = preferredId || reviewConversationState.currentId || reviewConversationState.sessions[0]?.id || "";
+  if (!nextId) {
+    const created = await createReviewConversation();
+    nextId = created?.id || "";
+  }
+  if (nextId) await openReviewConversation(nextId);
+}
+
+async function createReviewConversation() {
+  const promptId = reviewConversationState.promptTemplateId || aiReviewPromptTemplates[0]?.id || null;
+  const data = await api("/api/ai-review/conversations", {
+    method: "POST",
+    body: JSON.stringify({
+      title: "新审校",
+      prompt_template_id: promptId,
+      source_language: "auto",
+      target_languages: ["auto"],
+      auto_start: false,
+    }),
+  });
+  const session = data.session || {};
+  reviewConversationState.currentId = String(session.id || "");
+  reviewConversationState.sessions.unshift(session);
+  renderReviewConversationList();
+  if (session.id) await openReviewConversation(session.id);
+  return session;
+}
+
+function renderReviewConversationList() {
+  const list = $("reviewConversationList");
+  if (!list) return;
+  list.innerHTML = "";
+  reviewConversationState.sessions.forEach((session) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `review-session-item ${session.id === reviewConversationState.currentId ? "active" : ""}`.trim();
+    const title = document.createElement("strong");
+    title.textContent = session.title || "新审校";
+    const status = document.createElement("span");
+    status.textContent = reviewSessionStatusLabel(session.status);
+    button.append(title, status);
+    button.addEventListener("click", () => openReviewConversation(session.id).catch(showReviewConversationError));
+    list.appendChild(button);
+  });
+}
+
+async function openReviewConversation(sessionId) {
+  if (!sessionId) return;
+  reviewConversationState.currentId = String(sessionId);
+  const snapshot = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`);
+  reviewConversationState.snapshot = snapshot;
+  const session = snapshot.session || {};
+  reviewConversationState.sourceLanguage = session.source_language || "auto";
+  reviewConversationState.targetLanguages = Array.isArray(session.target_languages) && session.target_languages.length ? session.target_languages : ["auto"];
+  reviewConversationState.promptTemplateId = session.prompt_template_id || aiReviewPromptTemplates[0]?.id || "";
+  reviewConversationState.activeTarget = reviewConversationState.activeTarget || snapshot.task_results?.[0]?.target_language || "";
+  renderReviewConversationList();
+  renderReviewConversationSnapshot();
+  connectReviewConversationEvents(sessionId);
+}
+
+function renderReviewConversationSnapshot() {
+  const snapshot = reviewConversationState.snapshot || {};
+  const session = snapshot.session || {};
+  $("reviewConversationTitle").textContent = session.title || "新审校";
+  $("reviewConversationStatus").textContent = reviewSessionStatusLabel(session.status);
+  $("reviewAutoStart").checked = Boolean(session.auto_start);
+  const liveHints = {
+    inspecting: "Workspace Agent 正在识别内容…",
+    reviewing: "Task Workflow 正在审校…",
+    validating: "正在校验审校结果…",
+  };
+  $("reviewConversationHint").textContent = liveHints[session.status] || "";
+  updateReviewComposerChips();
+  renderReviewAttachments(snapshot.attachments || []);
+  renderReviewMessages(snapshot.messages || [], snapshot.questions || []);
+  renderReviewConversationResults(snapshot.task_results || []);
+}
+
+function renderReviewMessages(messages, questions) {
+  const container = $("reviewConversationMessages");
+  container.innerHTML = "";
+  messages.forEach((message) => {
+    const item = document.createElement("div");
+    item.className = `review-chat-message ${message.role === "user" ? "user" : "assistant"} ${message.kind === "error" ? "error" : ""} ${message.kind === "workspace_report" ? "workspace-report" : ""}`.trim();
+    const content = document.createElement("div");
+    content.textContent = message.content || "";
+    item.appendChild(content);
+    const meta = document.createElement("div");
+    meta.className = "review-chat-message-meta";
+    meta.textContent = String(message.created_at || "").replace("T", " ");
+    item.appendChild(meta);
+    container.appendChild(item);
+  });
+  questions.filter((question) => question.status === "pending").forEach((question) => {
+    const item = document.createElement("div");
+    item.className = "review-chat-message assistant";
+    const prompt = document.createElement("div");
+    prompt.textContent = question.prompt || "请确认识别结果";
+    const actions = document.createElement("div");
+    actions.className = "review-decision-actions";
+    const confirmButton = document.createElement("button");
+    confirmButton.type = "button";
+    confirmButton.className = "primary";
+    confirmButton.textContent = question.recommended_label || "确认";
+    confirmButton.addEventListener("click", () => submitReviewDecision(question, "confirm", question.recommended_value || "确认").catch(showReviewConversationError));
+    const otherInput = document.createElement("input");
+    otherInput.placeholder = "其他：自行输入";
+    const otherButton = document.createElement("button");
+    otherButton.type = "button";
+    otherButton.className = "secondary";
+    otherButton.textContent = "提交";
+    otherButton.addEventListener("click", () => submitReviewDecision(question, "other", otherInput.value).catch(showReviewConversationError));
+    actions.append(confirmButton, otherInput, otherButton);
+    item.append(prompt, actions);
+    container.appendChild(item);
+  });
+  container.scrollTop = container.scrollHeight;
+}
+
+async function submitReviewDecision(question, action, answer) {
+  if (action === "other" && !String(answer || "").trim()) throw new Error("请输入补充说明");
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/decision`, {
+    method: "POST",
+    body: JSON.stringify({ run_id: question.run_id, question_id: question.id, action, answer: answer || action }),
+  });
+  await refreshCurrentReviewConversation();
+}
+
+function renderReviewAttachments(attachments) {
+  const container = $("reviewAttachmentChips");
+  container.innerHTML = "";
+  attachments.forEach((attachment) => {
+    const chip = document.createElement("span");
+    chip.className = "review-attachment-chip";
+    chip.textContent = `${attachment.original_filename} · ${reviewAttachmentStatusLabel(attachment.status)}`;
+    container.appendChild(chip);
+  });
+}
+
+function renderReviewConversationResults(taskResults) {
+  const card = $("reviewConversationResultCard");
+  const tasks = Array.isArray(taskResults) ? taskResults : [];
+  card.classList.toggle("hidden", !tasks.length);
+  const tabs = $("reviewTargetTabs");
+  tabs.innerHTML = "";
+  if (!tasks.length) return;
+  if (!tasks.some((item) => item.target_language === reviewConversationState.activeTarget)) {
+    reviewConversationState.activeTarget = tasks[0].target_language;
+  }
+  tasks.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `review-target-tab ${item.target_language === reviewConversationState.activeTarget ? "active" : ""}`.trim();
+    button.textContent = item.target_language || "自动识别";
+    button.addEventListener("click", () => {
+      reviewConversationState.activeTarget = item.target_language;
+      renderReviewConversationResults(tasks);
+    });
+    tabs.appendChild(button);
+  });
+  const active = tasks.find((item) => item.target_language === reviewConversationState.activeTarget) || tasks[0];
+  aiReviewTaskId = String(active?.task?.id || "");
+  aiReviewCurrentTask = active?.task || null;
+  renderAiReviewResults(active?.task || {}, active?.results || []);
+}
+
+async function refreshCurrentReviewConversation() {
+  if (!reviewConversationState.currentId) return;
+  const snapshot = await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}`);
+  reviewConversationState.snapshot = snapshot;
+  const sessionIndex = reviewConversationState.sessions.findIndex((item) => item.id === snapshot.session?.id);
+  if (sessionIndex >= 0) reviewConversationState.sessions[sessionIndex] = snapshot.session;
+  renderReviewConversationSnapshot();
+}
+
+function connectReviewConversationEvents(sessionId) {
+  if (reviewConversationState.eventSource) reviewConversationState.eventSource.close();
+  const source = new EventSource(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/events`);
+  reviewConversationState.eventSource = source;
+  const eventNames = [
+    "message.created", "attachment.uploaded", "attachment.inspected", "workspace.started", "workspace.ready",
+    "workspace.needs_input", "workspace.failed", "workspace.question", "review.started", "review.progress",
+    "review.package_completed", "review.completed",
+  ];
+  eventNames.forEach((name) => source.addEventListener(name, scheduleReviewConversationRefresh));
+  source.onerror = () => {
+    if (reviewConversationState.currentId !== sessionId) source.close();
+  };
+}
+
+function scheduleReviewConversationRefresh() {
+  if (reviewConversationState.refreshTimer) window.clearTimeout(reviewConversationState.refreshTimer);
+  reviewConversationState.refreshTimer = window.setTimeout(() => refreshCurrentReviewConversation().catch(showReviewConversationError), 180);
+}
+
+async function uploadReviewConversationFiles(files) {
+  if (!files?.length) return;
+  if (!reviewConversationState.currentId) await createReviewConversation();
+  const form = new FormData();
+  Array.from(files).forEach((file) => form.append("files", file));
+  $("reviewConversationHint").textContent = `正在添加 ${files.length} 个文件…`;
+  const response = await fetch(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments`, { method: "POST", body: form });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || data.message || "文件上传失败");
+  $("reviewConversationHint").textContent = "文件已添加";
+  await refreshCurrentReviewConversation();
+}
+
+async function sendReviewConversationMessage() {
+  if (!reviewConversationState.currentId) await createReviewConversation();
+  const text = $("reviewComposerInput").value.trim();
+  const attachments = reviewConversationState.snapshot?.attachments || [];
+  if (!text && !attachments.length) throw new Error("请输入待审校文本或添加文件");
+  $("sendReviewConversationButton").disabled = true;
+  $("reviewConversationHint").textContent = "Workspace Agent 正在识别内容…";
+  try {
+    await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        prompt_template_id: reviewConversationState.promptTemplateId || null,
+        source_language: reviewConversationState.sourceLanguage,
+        target_languages: reviewConversationState.targetLanguages,
+        auto_start: $("reviewAutoStart").checked,
+      }),
+    });
+    $("reviewComposerInput").value = "";
+    await refreshCurrentReviewConversation();
+  } finally {
+    $("sendReviewConversationButton").disabled = false;
+  }
+}
+
+async function deleteCurrentReviewConversation() {
+  if (!reviewConversationState.currentId) return;
+  if (!window.confirm("删除后会同时清理本会话的附件和审校结果，确定继续吗？")) return;
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ confirm: true }),
+  });
+  if (reviewConversationState.eventSource) reviewConversationState.eventSource.close();
+  reviewConversationState.currentId = "";
+  reviewConversationState.snapshot = null;
+  reviewConversationState.activeTarget = "";
+  await loadReviewConversations();
+}
+
+function openReviewLanguagePopover(mode, anchor) {
+  reviewConversationState.languageMode = mode;
+  $("reviewLanguagePopoverTitle").textContent = mode === "source" ? "源语言" : "目标语言";
+  $("reviewLanguagePopoverHint").textContent = mode === "source" ? "单选" : "可多选";
+  $("reviewLanguageSearch").value = "";
+  renderReviewLanguageOptions();
+  const popover = $("reviewLanguagePopover");
+  popover.classList.remove("hidden");
+  const composer = $("reviewComposer");
+  const wantedLeft = Math.max(0, anchor.offsetLeft - 6);
+  const maxLeft = Math.max(0, composer.clientWidth - popover.offsetWidth - 14);
+  popover.style.left = `${Math.min(wantedLeft, maxLeft)}px`;
+  $("reviewLanguageSearch").focus();
+}
+
+function closeReviewLanguagePopover() {
+  $("reviewLanguagePopover").classList.add("hidden");
+}
+
+function renderReviewLanguageOptions() {
+  const search = $("reviewLanguageSearch").value.trim().toLowerCase();
+  const container = $("reviewLanguageOptions");
+  container.innerHTML = "";
+  reviewLanguages.filter((language) => !search || language.toLowerCase().includes(search)).forEach((language) => {
+    const value = language === "自动检测" ? "auto" : language;
+    const label = document.createElement("label");
+    label.className = "review-language-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "review-language";
+    input.value = value;
+    input.checked = reviewConversationState.languageMode === "source"
+      ? reviewConversationState.sourceLanguage === value
+      : reviewConversationState.targetLanguages.includes(value);
+    label.classList.toggle("selected", input.checked);
+    const check = document.createElement("span");
+    check.className = "review-language-check";
+    check.textContent = "✓";
+    label.append(input, check, document.createTextNode(language));
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (reviewConversationState.languageMode === "source") {
+        reviewConversationState.sourceLanguage = value;
+        updateReviewComposerChips();
+        closeReviewLanguagePopover();
+        return;
+      }
+      let selected = [...reviewConversationState.targetLanguages];
+      if (value === "auto") {
+        selected = ["auto"];
+      } else {
+        selected = selected.filter((item) => item !== "auto");
+        selected = selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value];
+        if (!selected.length) selected = ["auto"];
+      }
+      reviewConversationState.targetLanguages = selected;
+      updateReviewComposerChips();
+      renderReviewLanguageOptions();
+    });
+    container.appendChild(label);
+  });
+}
+
+function updateReviewComposerChips() {
+  const prompt = aiReviewPromptTemplates.find((item) => item.id === reviewConversationState.promptTemplateId) || aiReviewPromptTemplates[0];
+  $("reviewPromptChip").textContent = `提示词：${prompt?.name || "默认"}`;
+  $("reviewSourceLanguageChip").textContent = `源语言：${reviewConversationState.sourceLanguage === "auto" ? "自动" : reviewConversationState.sourceLanguage}`;
+  const targets = reviewConversationState.targetLanguages.map((value) => value === "auto" ? "自动" : value);
+  $("reviewTargetLanguageChip").textContent = `目标语言：${targets.join("、")}`;
+}
+
+async function openReviewConversationPromptDialog() {
+  const templateId = reviewConversationState.promptTemplateId || aiReviewPromptTemplates[0]?.id;
+  if (!templateId) throw new Error("没有可用提示词模板");
+  $("promptTemplateSelect").value = templateId;
+  const data = await api(`/api/ai-review/prompt-templates/${encodeURIComponent(templateId)}`);
+  fillAiReviewPromptDialog(data.template || {});
+  $("promptDialog").showModal();
+}
+
+function reviewSessionStatusLabel(status) {
+  return ({ draft: "等待输入", inspecting: "正在识别文件", needs_input: "等待确认", ready: "识别完成", reviewing: "正在审校", validating: "正在校验", completed: "已完成", partial: "部分完成", failed: "失败" })[status] || status || "等待输入";
+}
+
+function reviewAttachmentStatusLabel(status) {
+  return ({ uploaded: "待识别", ready: "已识别", needs_reader: "格式不支持", failed: "读取失败" })[status] || status || "待识别";
+}
+
+function showReviewConversationError(error) {
+  $("reviewConversationHint").textContent = error?.message || String(error || "操作失败");
+}
+
 async function chooseAiReviewFile() {
   $("reviewFileInput").click();
 }
@@ -7100,8 +7503,11 @@ async function loadSettings() {
     $("reviewAiThinking").checked = Boolean(aiReview.enable_thinking);
   }
   if ($("reviewAiLimit")) {
-    $("reviewAiLimit").value = aiReview.batch_request_char_limit || 3000;
+    $("reviewAiLimit").value = aiReview.batch_request_char_limit || 6000;
   }
+  $("reviewMaxItems").value = aiReview.max_items_per_request || 80;
+  $("reviewWorkspaceThinking").checked = Boolean(aiReview.workspace_enable_thinking);
+  $("reviewDebugPayloadLogging").checked = Boolean(aiReview.debug_payload_logging);
   $("builtinRegex").checked = nontrans.builtin_regex_enabled !== false;
   $("aiDiscovery").checked = nontrans.ai_discovery_enabled !== false;
   $("aiRegex").checked = nontrans.ai_regex_generation_enabled !== false;
@@ -7175,7 +7581,10 @@ async function saveSettings() {
 
 function reviewSettingsPayload() {
   return {
-    ai_review_batch_char_limit: Number($("reviewAiLimit").value || 3000),
+    ai_review_batch_char_limit: Number($("reviewAiLimit").value || 6000),
+    ai_review_max_items_per_request: Number($("reviewMaxItems").value || 80),
+    ai_review_workspace_enable_thinking: $("reviewWorkspaceThinking").checked,
+    ai_review_debug_payload_logging: $("reviewDebugPayloadLogging").checked,
     ai_review_enable_thinking: $("reviewAiThinking").checked,
   };
 }
@@ -8368,6 +8777,49 @@ document.querySelectorAll(".preset-color-btn").forEach((button) => {
 });
 $("selectAllCrossHeadersButton").addEventListener("click", () => setCrossExcelHeaderSelection(true));
 $("clearCrossHeadersButton").addEventListener("click", () => setCrossExcelHeaderSelection(false));
+$("newReviewConversationButton").addEventListener("click", () => createReviewConversation().catch(showReviewConversationError));
+$("deleteReviewConversationButton").addEventListener("click", () => deleteCurrentReviewConversation().catch(showReviewConversationError));
+$("reviewUploadChip").addEventListener("click", () => $("reviewConversationFileInput").click());
+$("reviewConversationFileInput").addEventListener("change", () => {
+  const files = $("reviewConversationFileInput").files;
+  uploadReviewConversationFiles(files).catch(showReviewConversationError).finally(() => ($("reviewConversationFileInput").value = ""));
+});
+$("reviewComposer").addEventListener("dragover", (event) => {
+  event.preventDefault();
+  $("reviewComposer").classList.add("dragging");
+});
+$("reviewComposer").addEventListener("dragleave", () => $("reviewComposer").classList.remove("dragging"));
+$("reviewComposer").addEventListener("drop", (event) => {
+  event.preventDefault();
+  $("reviewComposer").classList.remove("dragging");
+  uploadReviewConversationFiles(event.dataTransfer?.files).catch(showReviewConversationError);
+});
+$("sendReviewConversationButton").addEventListener("click", () => sendReviewConversationMessage().catch(showReviewConversationError));
+$("reviewComposerInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    sendReviewConversationMessage().catch(showReviewConversationError);
+  }
+});
+$("reviewPromptChip").addEventListener("click", () => openReviewConversationPromptDialog().catch(showReviewConversationError));
+$("reviewSourceLanguageChip").addEventListener("click", (event) => openReviewLanguagePopover("source", event.currentTarget));
+$("reviewTargetLanguageChip").addEventListener("click", (event) => openReviewLanguagePopover("target", event.currentTarget));
+$("reviewLanguageSearch").addEventListener("input", renderReviewLanguageOptions);
+$("closeReviewLanguagePopoverButton").addEventListener("click", closeReviewLanguagePopover);
+document.addEventListener("pointerdown", (event) => {
+  const popover = $("reviewLanguagePopover");
+  if (popover.classList.contains("hidden")) return;
+  if (popover.contains(event.target) || $("reviewSourceLanguageChip").contains(event.target) || $("reviewTargetLanguageChip").contains(event.target)) return;
+  closeReviewLanguagePopover();
+});
+$("promptDialogTemplateSelect").addEventListener("change", async () => {
+  const templateId = $("promptDialogTemplateSelect").value;
+  if (!templateId) return;
+  const data = await api(`/api/ai-review/prompt-templates/${encodeURIComponent(templateId)}`);
+  reviewConversationState.promptTemplateId = templateId;
+  fillAiReviewPromptDialog(data.template || {});
+  updateReviewComposerChips();
+});
 $("chooseReviewFileButton").addEventListener("click", () => chooseAiReviewFile().catch((error) => {
   $("reviewTaskHint").textContent = error.message;
 }));
@@ -8489,6 +8941,9 @@ $("saveExcelMappingPresetButton").addEventListener("click", () => {
 });
 $("confirmExcelMappingPresetButton").addEventListener("click", () => saveAiReviewExcelMappingPreset().catch((error) => {
   $("excelMappingPresetSaveHint").textContent = error.message;
+}));
+$("saveReviewAgentSettingsButton").addEventListener("click", () => saveReviewSettings().catch((error) => {
+  $("reviewSettingsHint").textContent = error.message;
 }));
 $("excelMappingPresetNameInput").addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
@@ -8632,7 +9087,7 @@ Promise.all([
   loadBuiltinRules(),
   loadPendingRules(),
   loadAppUpdateInfo(),
-  loadAiReviewPromptTemplates(),
+  loadAiReviewPromptTemplates().then(() => loadReviewConversations()),
   loadAiReviewDirectionalTemplates(),
   loadAiReviewForbiddenTemplates(),
 ]).then(refreshStatus).catch((error) => {

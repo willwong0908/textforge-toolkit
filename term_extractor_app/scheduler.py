@@ -19,13 +19,20 @@ class SchedulerCancelledError(Exception):
 
 
 class AdaptiveConcurrencyController:
-    def __init__(self, mode: str, user_max: int, provider_max: int, local_max: int = 8):
+    def __init__(
+        self,
+        mode: str,
+        user_max: int,
+        provider_max: int,
+        local_max: int = 8,
+        start_concurrency: int = 2,
+    ):
         effective_max = max(1, min(int(user_max or 1), int(provider_max or 1), int(local_max or 1)))
         self.mode = mode
         self.effective_max = effective_max
-        self.current_concurrency = min(2, effective_max) if mode == "自动" else effective_max
+        self.current_concurrency = min(max(1, int(start_concurrency)), effective_max) if mode == "自动" else effective_max
         self.success_streak = 0
-        self.success_window = 3
+        self.success_window = 1
 
     def observe_success(self) -> None:
         if self.mode != "自动":

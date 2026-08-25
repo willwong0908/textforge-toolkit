@@ -36,10 +36,41 @@ def get_shared_ai_settings() -> dict[str, Any]:
         "max_concurrency": int(provider.max_concurrency or 6),
         "max_chars_per_request": int(ai_review_stage.get("batch_request_char_limit") or 3000),
         "enable_thinking": bool(ai_review_stage.get("enable_thinking", False)),
+        "max_items_per_request": int(ai_review_stage.get("max_items_per_request") or 80),
+        "workspace_enable_thinking": bool(ai_review_stage.get("workspace_enable_thinking", False)),
+        "auto_start_after_inspection": bool(ai_review_stage.get("auto_start_after_inspection", False)),
+        "debug_payload_logging": bool(ai_review_stage.get("debug_payload_logging", False)),
         "disable_system_proxy": bool(provider.disable_system_proxy),
         "timeout_seconds": int(provider.timeout_seconds or 90),
         "base_url": provider.base_url,
     }
+
+
+def workspace_chat(messages: list[dict[str, str]]) -> str:
+    async def _run() -> str:
+        provider_name, provider = _load_provider_settings()
+        settings = get_shared_ai_settings()
+        if not provider.api_key:
+            raise SharedProviderError("请先配置模型 API Key")
+        if not provider.model:
+            raise SharedProviderError("请先在模型设置中选择模型")
+        adapter = ProviderRegistry.create_adapter(provider_name, provider)
+        try:
+            request = LLMRequest(
+                task_id="ai-review-workspace",
+                task_type="ai_review_workspace",
+                prompt=messages[-1]["content"] if messages else "",
+                messages=messages,
+                metadata={"enable_thinking": bool(settings.get("workspace_enable_thinking", False))},
+            )
+            response = await adapter.send_prompt(request)
+        finally:
+            await adapter.close()
+        if not response.success:
+            raise SharedProviderError(response.error or "Workspace Agent 请求失败")
+        return str(response.content or "")
+
+    return asyncio.run(_run())
 
 
 def list_models(api_key: str) -> list[str]:

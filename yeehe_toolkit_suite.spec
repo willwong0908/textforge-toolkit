@@ -9,6 +9,7 @@ hiddenimports = [
     "fastapi",
     "starlette",
     "pydantic",
+    "pypdf",
 ]
 excludes = [
     "IPython",

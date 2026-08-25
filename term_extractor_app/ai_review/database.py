@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Iterator
 
 from .config import DB_PATH, ensure_directories
 
 
 def utc_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
+    return datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 @contextmanager
@@ -210,6 +210,123 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                prompt_template_id TEXT,
+                source_language TEXT NOT NULL DEFAULT 'auto',
+                target_languages_json TEXT NOT NULL DEFAULT '["auto"]',
+                auto_start INTEGER NOT NULL DEFAULT 0,
+                context_summary TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_attachments (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                file_type TEXT NOT NULL DEFAULT '',
+                file_hash TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'uploaded',
+                manifest_json TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES review_sessions(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'message',
+                content TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES review_sessions(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_runs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                input_signature TEXT NOT NULL DEFAULT '',
+                plan_json TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES review_sessions(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_questions (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                recommended_label TEXT NOT NULL DEFAULT '',
+                recommended_value TEXT NOT NULL DEFAULT '',
+                answer TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                answered_at TEXT,
+                FOREIGN KEY(session_id) REFERENCES review_sessions(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_session_tasks (
+                session_id TEXT NOT NULL,
+                target_language TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, target_language, task_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extraction_profiles (
+                signature TEXT PRIMARY KEY,
+                reader_name TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                confirmed_count INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_results)").fetchall()
@@ -228,11 +345,40 @@ def init_db() -> None:
             conn.execute("ALTER TABLE file_items ADD COLUMN source_column TEXT")
         if "target_column" not in item_columns:
             conn.execute("ALTER TABLE file_items ADD COLUMN target_column TEXT")
+        if "target_language" not in item_columns:
+            conn.execute("ALTER TABLE file_items ADD COLUMN target_language TEXT NOT NULL DEFAULT ''")
+        if "location_json" not in item_columns:
+            conn.execute("ALTER TABLE file_items ADD COLUMN location_json TEXT NOT NULL DEFAULT '{}'")
+        if "references_json" not in item_columns:
+            conn.execute("ALTER TABLE file_items ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'")
+        prompt_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(prompt_templates)").fetchall()
+        }
+        if "forbidden_words_text" not in prompt_columns:
+            conn.execute("ALTER TABLE prompt_templates ADD COLUMN forbidden_words_text TEXT NOT NULL DEFAULT ''")
+        task_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_tasks)").fetchall()
+        }
+        if "session_id" not in task_columns:
+            conn.execute("ALTER TABLE review_tasks ADD COLUMN session_id TEXT")
+        if "target_language" not in task_columns:
+            conn.execute("ALTER TABLE review_tasks ADD COLUMN target_language TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_review_followup_messages_result
             ON review_followup_messages(task_id, result_id, created_at)
             """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_messages_session ON review_messages(session_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_attachments_session ON review_attachments(session_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_events_session ON review_session_events(session_id, id)"
         )
 
 

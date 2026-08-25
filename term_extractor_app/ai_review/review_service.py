@@ -14,6 +14,7 @@ from .forbidden_service import check_forbidden_words, get_forbidden_template, pa
 from .output_service import generate_review_excel
 from .prompt_service import get_prompt_template
 from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings
+from .session_store import emit_event
 from ..models import LLMRequest, LLMResponse
 from ..providers import ProviderRegistry
 from ..scheduler import AdaptiveConcurrencyController, AsyncRequestScheduler
@@ -77,7 +78,10 @@ def create_review_task(
     enable_ai_review: bool = True,
     enable_forbidden_check: bool = False,
     forbidden_template_id: str | None = None,
+    session_id: str | None = None,
 ) -> str:
+    if mode == "directional":
+        raise ReviewTaskError("定向审校已移除，请使用提示词模板配置审校规则")
     items = _get_batch_items(batch_id)
     if not items:
         raise ReviewTaskError("当前没有可审校条目，请先读取文件")
@@ -141,6 +145,10 @@ def create_review_task(
         }
     else:
         prompt = get_prompt_template(prompt_template_id)
+        prompt_forbidden_words = parse_forbidden_words(str(prompt.get("forbidden_words_text") or ""))
+        if prompt_forbidden_words:
+            enable_forbidden_check = True
+            forbidden_words = prompt_forbidden_words
         config = {
             "mode": "normal",
             "enable_ai_review": True,
@@ -157,17 +165,20 @@ def create_review_task(
             "target_language": target_language.strip(),
             "max_chars_per_request": int(settings.get("max_chars_per_request") or 3000),
             "max_concurrency": int(settings.get("max_concurrency") or 8),
+            "max_items_per_request": int(settings.get("max_items_per_request") or 80),
             "enable_thinking": bool(settings.get("enable_thinking", False)),
+            "debug_payload_logging": bool(settings.get("debug_payload_logging", False)),
+            "session_id": str(session_id or ""),
         }
     with get_connection() as conn:
         conn.execute(
             """
             INSERT INTO review_tasks (
-                id, batch_id, status, total_count, config_json, created_at, updated_at
+                id, batch_id, session_id, target_language, status, total_count, config_json, created_at, updated_at
             )
-            VALUES (?, ?, 'pending', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
             """,
-            (task_id, batch_id, len(items), dumps_json(config), now, now),
+            (task_id, batch_id, session_id, target_language.strip(), len(items), dumps_json(config), now, now),
         )
     _add_log(task_id, "info", f"任务已创建，共 {len(items)} 条")
     _track_ai_review_start(config)
@@ -439,6 +450,7 @@ def _run_review_task(task_id: str) -> None:
         directional_signature = _directional_signature(config)
         enable_thinking = bool(config.get("enable_thinking", False))
         request_items = []
+        cached_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for item in items:
             cache_key = _cache_key(
                 item["source_text"],
@@ -449,11 +461,23 @@ def _run_review_task(task_id: str) -> None:
                 directional_signature,
                 enable_thinking,
             )
-            request_items.append({**item, "cache_key": cache_key})
+            item_with_cache = {**item, "cache_key": cache_key}
+            cached = _get_cached_result(cache_key)
+            if cached is None:
+                request_items.append(item_with_cache)
+            else:
+                cached_pairs.append((item_with_cache, cached))
 
-        _update_task(task_id, cached_count=0, completed_count=0)
+        if cached_pairs:
+            _save_review_results_bulk(task_id, cached_pairs, status="cached")
+        cached_count = len(cached_pairs)
+        _update_task(task_id, cached_count=cached_count, completed_count=cached_count)
 
-        packages = _build_packages(request_items, max_chars)
+        packages = _build_packages(
+            request_items,
+            max_chars,
+            max_items=max(1, int(config.get("max_items_per_request") or 80)),
+        )
         requested_count, completed_count, failed_count = asyncio.run(
             _run_review_packages(
                 task_id=task_id,
@@ -461,6 +485,7 @@ def _run_review_task(task_id: str) -> None:
                 model=model,
                 config=config,
                 packages=packages,
+                initial_completed=cached_count,
             )
         )
     else:
@@ -515,10 +540,11 @@ async def _run_review_packages(
     model: str,
     config: dict[str, Any],
     packages: list[list[dict[str, Any]]],
+    initial_completed: int = 0,
 ) -> tuple[int, int, int]:
     """Run independent review packages concurrently with adaptive backpressure."""
     if not packages:
-        return 0, 0, 0
+        return 0, max(0, int(initial_completed)), 0
 
     provider_name, provider_settings = _load_review_provider(api_key, model)
     adapter = ProviderRegistry.create_adapter(provider_name, provider_settings)
@@ -554,7 +580,7 @@ async def _run_review_packages(
         )
 
     requested_count = 0
-    completed_count = 0
+    completed_count = max(0, int(initial_completed))
     failed_count = 0
     counters_lock = threading.Lock()
 
@@ -563,8 +589,8 @@ async def _run_review_packages(
             return response
         try:
             parsed = _parse_json_object(response.content)
-            if not isinstance(parsed.get("items"), list):
-                raise ReviewTaskError("AI 返回 JSON 中缺少 items 数组")
+            package = list(request.metadata.get("package") or [])
+            _validate_response_items(parsed, package, config)
         except (ReviewTaskError, json.JSONDecodeError) as exc:
             return LLMResponse(
                 task_id=response.task_id,
@@ -587,21 +613,23 @@ async def _run_review_packages(
         package = list(request.metadata.get("package") or [])
         package_index = int(request.metadata.get("package_index") or 0)
         _add_log(task_id, "info", f"第 {package_index}/{len(packages)} 包完成，包含 {len(package)} 条，并发 {snapshot.current_concurrency}")
-        _add_log(
-            task_id,
-            "debug",
-            _format_ai_request_log(
-                attempt=response.attempts,
-                model=model,
-                system_prompt=config["system_prompt"],
-                user_prompt=request.prompt,
-                item_count=len(package),
-            ),
-        )
-        _add_log(task_id, "debug", "AI 返回内容：\n" + str(response.content or ""))
+        if bool(config.get("debug_payload_logging", False)):
+            _add_log(
+                task_id,
+                "debug",
+                _format_ai_request_log(
+                    attempt=response.attempts,
+                    model=model,
+                    system_prompt=config["system_prompt"],
+                    user_prompt=request.prompt,
+                    item_count=len(package),
+                ),
+            )
+            _add_log(task_id, "debug", "AI 返回内容：\n" + str(response.content or ""))
         if response.success:
             parsed_items = _parse_json_object(response.content).get("items", [])
             result_by_id = {str(item.get("id")): item for item in parsed_items if isinstance(item, dict)}
+            saved_results = []
             for item in package:
                 if config.get("mode") == "directional":
                     result = _normalize_directional_result(
@@ -609,13 +637,24 @@ async def _run_review_packages(
                     )
                 else:
                     result = _normalize_result(result_by_id.get(item["id"]), item["id"])
-                _save_review_result(task_id, item["id"], item["cache_key"], "completed", result)
-            _add_log(task_id, "debug", f"AI 返回校验通过：{len(parsed_items)} 条")
+                saved_results.append((item, result))
+            _save_review_results_bulk(task_id, saved_results)
+            _cache_review_results_bulk(
+                saved_results,
+                model=model,
+                prompt_signature=_prompt_signature(
+                    config["system_prompt"],
+                    config["user_prompt"],
+                    str(config.get("source_language") or ""),
+                    str(config.get("target_language") or ""),
+                ),
+                directional_signature=_directional_signature(config),
+            )
+            _add_log(task_id, "info", f"第 {package_index} 包校验通过：{len(parsed_items)} 条")
         else:
             message = str(response.error or "请求失败")
             _add_log(task_id, "error", f"第 {package_index} 包失败，已重试 {max(0, response.attempts - 1)} 次：{message}")
-            for item in package:
-                _save_review_error(task_id, item["id"], item["cache_key"], message)
+            _save_review_errors_bulk(task_id, package, message)
 
         with counters_lock:
             requested_count += len(package)
@@ -627,6 +666,21 @@ async def _run_review_packages(
                 requested_count=requested_count,
                 completed_count=completed_count,
                 failed_count=failed_count,
+            )
+        session_id = str(config.get("session_id") or "")
+        if session_id:
+            emit_event(
+                session_id,
+                "review.package_completed",
+                {
+                    "task_id": task_id,
+                    "package_index": package_index,
+                    "package_total": len(packages),
+                    "item_count": len(package),
+                    "success": bool(response.success),
+                    "completed_count": completed_count,
+                    "failed_count": failed_count,
+                },
             )
 
     original_send_prompt = adapter.send_prompt
@@ -641,7 +695,15 @@ async def _run_review_packages(
 
     adapter.send_prompt = logged_send_prompt
 
-    controller = AdaptiveConcurrencyController(mode="自动", user_max=4, provider_max=4)
+    configured_max = max(1, int(config.get("max_concurrency") or provider_settings.max_concurrency or 1))
+    provider_max = max(1, int(provider_settings.max_concurrency or configured_max))
+    controller = AdaptiveConcurrencyController(
+        mode="自动",
+        user_max=configured_max,
+        provider_max=provider_max,
+        local_max=32,
+        start_concurrency=min(4, configured_max, provider_max),
+    )
     scheduler = AsyncRequestScheduler(
         adapter=adapter,
         controller=controller,
@@ -650,7 +712,11 @@ async def _run_review_packages(
         response_validator=validate_response,
     )
     try:
-        _add_log(task_id, "info", f"开始 AI 审校，共 {len(packages)} 包；自动并发从 2 路启动，最高 4 路。")
+        _add_log(
+            task_id,
+            "info",
+            f"开始 AI 审校，共 {len(packages)} 包；自动并发从 {controller.current_concurrency} 路启动，最高 {controller.effective_max} 路。",
+        )
         await scheduler.run(requests, on_result=on_result)
     finally:
         await adapter.close()
@@ -665,7 +731,9 @@ def _load_review_provider(api_key: str, model: str):
     return provider_name, provider_settings
 
 
-def _build_packages(items: list[dict[str, Any]], max_chars: int) -> list[list[dict[str, Any]]]:
+def _build_packages(
+    items: list[dict[str, Any]], max_chars: int, *, max_items: int = 80
+) -> list[list[dict[str, Any]]]:
     packages: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_chars = 0
@@ -679,7 +747,7 @@ def _build_packages(items: list[dict[str, Any]], max_chars: int) -> list[list[di
                 current_chars = 0
             packages.append([item])
             continue
-        if current and current_chars + item_chars > max_chars:
+        if current and (current_chars + item_chars > max_chars or len(current) >= max_items):
             packages.append(current)
             current = []
             current_chars = 0
@@ -702,6 +770,134 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     if start >= 0 and end >= start:
         text = text[start : end + 1]
     return json.loads(text)
+
+
+def _validate_response_items(
+    parsed: dict[str, Any], package: list[dict[str, Any]], config: dict[str, Any]
+) -> None:
+    raw_items = parsed.get("items")
+    if not isinstance(raw_items, list):
+        raise ReviewTaskError("AI 返回 JSON 中缺少 items 数组")
+    expected_ids = [str(item["id"]) for item in package]
+    returned_ids: list[str] = []
+    for index, item in enumerate(raw_items, 1):
+        if not isinstance(item, dict):
+            raise ReviewTaskError(f"AI 返回第 {index} 个条目不是对象")
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            raise ReviewTaskError(f"AI 返回第 {index} 个条目缺少 id")
+        returned_ids.append(item_id)
+        if config.get("mode") == "directional":
+            if not isinstance(item.get("checks"), dict):
+                raise ReviewTaskError(f"AI 返回条目 {item_id} 缺少 checks 对象")
+            if not isinstance(item.get("suggestion", ""), str):
+                raise ReviewTaskError(f"AI 返回条目 {item_id} 的 suggestion 不是字符串")
+        else:
+            required = {"has_issue", "issue_type", "issue", "suggestion"}
+            missing = required.difference(item)
+            if missing:
+                raise ReviewTaskError(f"AI 返回条目 {item_id} 缺少字段：{', '.join(sorted(missing))}")
+            if not isinstance(item["has_issue"], bool):
+                raise ReviewTaskError(f"AI 返回条目 {item_id} 的 has_issue 必须是布尔值")
+            for key in ("issue_type", "issue", "suggestion"):
+                if not isinstance(item[key], str):
+                    raise ReviewTaskError(f"AI 返回条目 {item_id} 的 {key} 必须是字符串")
+    if len(returned_ids) != len(expected_ids):
+        raise ReviewTaskError(f"AI 返回 {len(returned_ids)} 条，预期 {len(expected_ids)} 条")
+    if len(set(returned_ids)) != len(returned_ids):
+        raise ReviewTaskError("AI 返回存在重复 id")
+    if set(returned_ids) != set(expected_ids):
+        missing = sorted(set(expected_ids) - set(returned_ids))
+        extra = sorted(set(returned_ids) - set(expected_ids))
+        raise ReviewTaskError(f"AI 返回 id 不匹配；缺少 {missing[:5]}，多出 {extra[:5]}")
+
+
+def _save_review_results_bulk(
+    task_id: str,
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    status: str = "completed",
+) -> None:
+    if not pairs:
+        return
+    now = utc_now()
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO review_results (
+                id, task_id, item_id, cache_key, status, has_issue, issue_type,
+                issue, suggestion, directional_checks_json, error_message,
+                raw_result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)
+            """,
+            [
+                (
+                    uuid.uuid4().hex,
+                    task_id,
+                    item["id"],
+                    item.get("cache_key", ""),
+                    status,
+                    1 if result.get("has_issue") else 0,
+                    result.get("issue_type", ""),
+                    result.get("issue", ""),
+                    result.get("suggestion", ""),
+                    dumps_json(result.get("checks", {})),
+                    dumps_json(result),
+                    now,
+                    now,
+                )
+                for item, result in pairs
+            ],
+        )
+
+
+def _save_review_errors_bulk(task_id: str, package: list[dict[str, Any]], message: str) -> None:
+    if not package:
+        return
+    now = utc_now()
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO review_results (
+                id, task_id, item_id, cache_key, status, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'failed', ?, ?, ?)
+            """,
+            [
+                (uuid.uuid4().hex, task_id, item["id"], item.get("cache_key", ""), message, now, now)
+                for item in package
+            ],
+        )
+
+
+def _cache_review_results_bulk(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    model: str,
+    prompt_signature: str,
+    directional_signature: str,
+) -> None:
+    if not pairs:
+        return
+    now = utc_now()
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO ai_result_cache (
+                cache_key, source_text, target_text, model, prompt_signature,
+                directional_signature, result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                result_json = excluded.result_json,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    item["cache_key"], item.get("source_text", ""), item.get("target_text", ""),
+                    model, prompt_signature, directional_signature, dumps_json(result), now, now,
+                )
+                for item, result in pairs
+            ],
+        )
 
 
 def _normalize_result(result: Any, item_id: str) -> dict[str, Any]:

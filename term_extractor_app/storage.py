@@ -201,8 +201,12 @@ def build_default_settings() -> AppSettings:
                 "enable_thinking": False,
             },
             "ai_review_stage_settings": {
-                "batch_request_char_limit": 3000,
+                "batch_request_char_limit": 6000,
+                "max_items_per_request": 80,
                 "enable_thinking": False,
+                "workspace_enable_thinking": False,
+                "auto_start_after_inspection": False,
+                "debug_payload_logging": False,
             },
             "term_stage_settings": {
                 "single_item_char_limit": 500,
