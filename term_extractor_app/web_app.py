@@ -2225,8 +2225,6 @@ INDEX_HTML = """<!doctype html>
             <button class="nav-link nav-link-sub" data-page-target="modelStageSettingsPage">模型阶段设置</button>
             <button class="nav-link nav-link-sub" data-page-target="nontransSettingsPage">非译元素设置</button>
             <button class="nav-link nav-link-sub" data-page-target="promptSettingsPage">提示词设置</button>
-            <button class="nav-link nav-link-sub" data-page-target="runDetailsPage">运行详情</button>
-            <button class="nav-link nav-link-sub" data-page-target="resultsPage">结果</button>
           </div>
         </details>
 
@@ -2326,20 +2324,38 @@ INDEX_HTML = """<!doctype html>
             <pre id="scanResult" class="result-box">尚未扫描</pre>
           </section>
 
-          <section class="card">
+          <section class="card preprocess-progress-card">
             <div class="card-title">
-              <h3>当前状态</h3>
-              <p></p>
+              <div>
+                <h3>任务进度</h3>
+                <p id="preprocessProgressMessage">等待开始任务。</p>
+              </div>
+              <span id="preprocessProgressState" class="preprocess-status-pill">空闲</span>
             </div>
-            <div class="metrics hero-metrics">
-              <div><span>进度</span><strong id="progressText">0 / 0</strong></div>
+            <div class="preprocess-progress-overview">
+              <div class="preprocess-progress-total">
+                <span>已完成</span>
+                <strong id="progressText">0 / 0</strong>
+              </div>
+              <div class="preprocess-progress-stage">
+                <span>当前阶段</span>
+                <strong id="preprocessProgressStage">未启动</strong>
+              </div>
+              <span id="preprocessProgressPercent" class="preprocess-progress-percent">未开始</span>
+            </div>
+            <div class="progress"><span id="progressBar"></span></div>
+            <div class="preprocess-progress-metrics">
               <div><span>批次</span><strong id="batchText">0 / 0</strong></div>
               <div><span>成功</span><strong id="successText">0</strong></div>
               <div><span>失败</span><strong id="failureText">0</strong></div>
               <div><span>重试</span><strong id="retryText">0</strong></div>
               <div><span>并发</span><strong id="concurrencyText">0</strong></div>
+              <div><span>AI 请求</span><strong id="preprocessLlmRequests">0</strong></div>
             </div>
-            <div class="progress"><span id="progressBar"></span></div>
+            <section class="preprocess-events" aria-label="最近任务事件">
+              <div class="preprocess-events-head"><strong>最近事件</strong><span>实时更新</span></div>
+              <div id="preprocessRecentEvents" class="preprocess-events-list"><span class="preprocess-events-empty">暂无任务事件</span></div>
+            </section>
             <div class="actions">
               <button id="resumeButton" class="secondary">继续任务</button>
               <button id="stopButton" class="danger">停止任务</button>
@@ -2546,7 +2562,7 @@ INDEX_HTML = """<!doctype html>
         </div>
       </section>
 
-      <section id="runDetailsPage" class="page-section">
+      <section id="runDetailsPage" class="page-section" data-internal-view="true" aria-hidden="true">
         <section class="card">
           <div class="stats-panel">
             <div class="stats-title">任务统计</div>
@@ -2584,7 +2600,7 @@ INDEX_HTML = """<!doctype html>
         </section>
       </section>
 
-      <section id="resultsPage" class="page-section">
+      <section id="resultsPage" class="page-section" data-internal-view="true" aria-hidden="true">
         <div class="grid two">
           <section class="card">
             <div class="card-title">
@@ -5913,6 +5929,123 @@ input:disabled, select:disabled {
   background: linear-gradient(145deg, rgba(73, 111, 151, .5), rgba(27, 51, 76, .78));
   color: #eff8ff;
 }
+.preprocess-progress-card {
+  display: grid;
+  gap: 14px;
+}
+.preprocess-progress-card .card-title { margin-bottom: 0; align-items: flex-start; }
+.preprocess-progress-card .card-title > div { display: grid; gap: 4px; }
+.preprocess-status-pill {
+  flex: 0 0 auto;
+  min-width: 54px;
+  padding: 5px 9px;
+  border: 1px solid rgba(125, 151, 192, .42);
+  border-radius: 999px;
+  background: rgba(52, 70, 103, .36);
+  color: #b7c7de;
+  font-size: 12px;
+  font-weight: 750;
+  text-align: center;
+}
+.preprocess-status-pill.is-running { border-color: rgba(141, 174, 255, .56); background: rgba(93, 141, 255, .16); color: #c8d8ff; }
+.preprocess-status-pill.is-completed { border-color: rgba(122, 216, 205, .46); background: rgba(65, 174, 156, .14); color: #9ae6d6; }
+.preprocess-status-pill.is-failed { border-color: rgba(255, 143, 149, .44); background: rgba(147, 43, 55, .18); color: #ffb8bd; }
+.preprocess-status-pill.is-paused { border-color: rgba(244, 183, 64, .42); background: rgba(122, 88, 24, .20); color: #ffd486; }
+.preprocess-progress-overview {
+  display: grid;
+  grid-template-columns: minmax(132px, .72fr) minmax(0, 1.8fr) auto;
+  align-items: stretch;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid rgba(104, 133, 181, .34);
+  border-radius: 8px;
+  background: rgba(104, 133, 181, .26);
+}
+.preprocess-progress-overview > div,
+.preprocess-progress-percent {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-height: 68px;
+  padding: 12px 14px;
+  background: rgba(10, 20, 36, .58);
+}
+.preprocess-progress-overview span { color: #91a5c1; font-size: 12px; }
+.preprocess-progress-overview strong { color: #eff5ff; font-size: 19px; letter-spacing: -.02em; }
+.preprocess-progress-percent {
+  min-width: 74px;
+  color: #aee8df !important;
+  font-weight: 750;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.preprocess-progress-card .progress {
+  height: 7px;
+  margin: -3px 0 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(125, 151, 192, .18);
+}
+.preprocess-progress-card .progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #72d8cb, #91b0ff 70%, #dbc06d);
+  box-shadow: 0 0 14px rgba(122, 216, 205, .20);
+  transition: width .28s ease;
+}
+.preprocess-progress-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+.preprocess-progress-metrics > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid rgba(104, 133, 181, .28);
+  border-radius: 6px;
+  background: rgba(13, 25, 44, .46);
+}
+.preprocess-progress-metrics span { color: #8fa3bf; font-size: 11px; }
+.preprocess-progress-metrics strong { overflow: hidden; color: #e6eefb; font-size: 16px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.preprocess-events {
+  overflow: hidden;
+  border: 1px solid rgba(104, 133, 181, .28);
+  border-radius: 7px;
+  background: rgba(7, 16, 30, .32);
+}
+.preprocess-events-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 11px;
+  border-bottom: 1px solid rgba(104, 133, 181, .20);
+  background: rgba(39, 57, 89, .23);
+}
+.preprocess-events-head strong { color: #dce8f8; font-size: 12px; }
+.preprocess-events-head span { color: #8ea5c5; font-size: 11px; }
+.preprocess-events-list { display: grid; gap: 0; }
+.preprocess-event {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 7px 11px;
+  border-top: 1px solid rgba(104, 133, 181, .16);
+  color: #9fb0c8;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.preprocess-event:first-child { border-top: 0; }
+.preprocess-event.is-latest { color: #d3e1f4; background: rgba(93, 141, 255, .06); }
+.preprocess-event-marker { width: 5px; height: 5px; border-radius: 50%; background: #7188aa; }
+.preprocess-event.is-latest .preprocess-event-marker { background: #7ad8cd; box-shadow: 0 0 0 3px rgba(122, 216, 205, .10); }
+.preprocess-event span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preprocess-events-empty { padding: 11px; color: #8193ae; font-size: 12px; }
 .review-request-queue {
   margin: 0 0 14px;
   border: 1px solid rgba(108, 145, 202, .36);
@@ -5986,6 +6119,9 @@ input:disabled, select:disabled {
 .review-request-more { padding: 3px 2px 0; color: #8296b2; font-size: 11px; }
 .review-request-empty { padding: 10px; color: #7f92ad; font-size: 12px; }
 @media (max-width: 700px) {
+  .preprocess-progress-overview { grid-template-columns: 1fr auto; }
+  .preprocess-progress-stage { grid-column: 1 / -1; border-top: 1px solid rgba(104, 133, 181, .26); }
+  .preprocess-progress-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .review-request-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .review-request-queue-head { align-items: flex-start; flex-direction: column; gap: 3px; }
   .tool-guide-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
@@ -6191,7 +6327,7 @@ const TOOL_GUIDES = {
     sections: [
       ["用途", "从游戏文本表中提取术语，识别不应翻译的标签、变量、占位符等非译元素，并导出整理好的结果表。"],
       ["适合处理", ["Excel 文本表", "XLIFF 文件", "带有 HTML 标签、花括号、变量、格式代码的游戏文本"]],
-      ["基本用法", ["在“模型设置”中加载模型。", "进入“文本预处理工具”，选择输入目录和待提取列。", "选择运行模式，点击“开始提取”。", "完成后在“结果”页打开输出文件。"]],
+      ["基本用法", ["在“模型设置”中加载模型。", "进入“文本预处理工具”，选择输入目录和待提取列。", "选择运行模式，点击“开始提取”。", "完成后在“总览”中查看进度并打开输出文件。"]],
       ["输出结果", ["术语库", "非译元素正则规则", "失败记录和任务日志"]],
     ],
   },
@@ -6252,6 +6388,9 @@ async function trackToolOpen(toolKey) {
 }
 
 function setPage(pageId) {
+  if (pageId === "runDetailsPage" || pageId === "resultsPage") {
+    pageId = "overviewPage";
+  }
   currentPageId = pageId;
   document.querySelectorAll(".page-section").forEach((section) => {
     section.classList.toggle("active", section.id === pageId);
@@ -10403,18 +10542,70 @@ function formatProgressPercent(current, total, isRunning) {
   return `${percent}%`;
 }
 
+function getPreprocessProgressState(data) {
+  const current = Math.max(0, Number(data.progress_current || 0));
+  const total = Math.max(0, Number(data.progress_total || 0));
+  if (data.is_running) return { label: "运行中", className: "is-running" };
+  if (data.last_error) return { label: "失败", className: "is-failed" };
+  if (total > 0 && current >= total) return { label: "已完成", className: "is-completed" };
+  if (data.can_resume) return { label: "已暂停", className: "is-paused" };
+  return { label: "空闲", className: "" };
+}
+
+function renderPreprocessRecentEvents(data) {
+  const container = $("preprocessRecentEvents");
+  if (!container) return;
+  const logs = Array.isArray(data.logs) ? data.logs.filter(Boolean).slice(-3).reverse() : [];
+  container.replaceChildren();
+  if (!logs.length) {
+    const empty = document.createElement("span");
+    empty.className = "preprocess-events-empty";
+    empty.textContent = data.message || "暂无任务事件";
+    container.appendChild(empty);
+    return;
+  }
+  logs.forEach((entry, index) => {
+    const item = document.createElement("div");
+    item.className = "preprocess-event";
+    const marker = document.createElement("i");
+    marker.className = "preprocess-event-marker";
+    const copy = document.createElement("span");
+    copy.textContent = String(entry);
+    item.append(marker, copy);
+    if (index === 0) item.classList.add("is-latest");
+    container.appendChild(item);
+  });
+}
+
+function renderPreprocessProgress(data) {
+  const current = Math.max(0, Number(data.progress_current || 0));
+  const total = Math.max(0, Number(data.progress_total || 0));
+  const state = getPreprocessProgressState(data);
+  const stateElement = $("preprocessProgressState");
+  stateElement.textContent = state.label;
+  stateElement.className = `preprocess-status-pill ${state.className}`.trim();
+  $("progressText").textContent = `${current} / ${total}`;
+  $("preprocessProgressStage").textContent = data.stage_label || data.stage || "未启动";
+  $("preprocessProgressMessage").textContent = data.message || (data.is_running ? "任务正在处理。" : "等待开始任务。");
+  $("preprocessProgressPercent").textContent = formatProgressPercent(current, total, data.is_running);
+  $("preprocessLlmRequests").textContent = Number((data.stats || {}).llm_request_count || 0);
+  $("progressBar").style.width = total > 0 ? `${Math.min(100, Math.round((current / total) * 100))}%` : "0";
+  renderPreprocessRecentEvents(data);
+}
+
 async function refreshStatus() {
   const data = await api("/api/status");
+  const preprocessState = getPreprocessProgressState(data);
   setTaskStatus("overviewPage", {
     active: Boolean(data.is_running),
     taskLabel: "文本预处理工具",
-    pill: data.is_running ? "运行中" : data.last_error ? "失败" : "空闲",
+    pill: preprocessState.label,
     pillClass: data.is_running ? "running" : data.last_error ? "failed" : "",
     stageLabel: data.stage_label || data.stage || "未启动",
     message: data.message || (data.is_running ? "任务运行中" : "等待开始任务"),
   });
   renderCurrentTaskStatus();
-  $("progressText").textContent = formatProgressPercent(data.progress_current, data.progress_total, data.is_running);
+  renderPreprocessProgress(data);
   $("batchText").textContent = `${data.current_batch || 0} / ${data.total_batches || 0}`;
   $("successText").textContent = data.success_count || 0;
   $("failureText").textContent = data.failure_count || 0;
@@ -10441,9 +10632,6 @@ async function refreshStatus() {
   $("statLlmLatencyAvg").textContent = stats.llm_latency_ms_avg || 0;
   $("statLlmPromptChars").textContent = stats.llm_prompt_char_count || 0;
   $("statLlmTokens").textContent = stats.llm_total_token_count || 0;
-  const total = Number(data.progress_total || 0);
-  const current = Number(data.progress_current || 0);
-  $("progressBar").style.width = total > 0 ? `${Math.min(100, Math.round((current / total) * 100))}%` : "0";
   $("outputFile").value = data.output_file || "";
   $("lastError").value = data.last_error || "";
   $("errorPanel").hidden = !data.last_error;
