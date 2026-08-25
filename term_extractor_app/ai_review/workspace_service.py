@@ -54,6 +54,27 @@ WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单�
 结构清单：
 {manifest_json}"""
 
+DIRECT_TEXT_WORKSPACE_SYSTEM_PROMPT = """你是翻译审校工具的 Workspace Agent，当前会话没有附件，只有用户直接输入的自然语言文本。你不执行审校，只负责把这条消息整理成可执行的单语审校单元。
+用户消息可能同时包含任务说明和待审校正文，例如“审校英文：I love you.”。你必须理解整句话，去掉仅用于说明操作的前缀、标签、引号包装和元信息，保留真正要审校的正文；除非这些词本身明显属于待审校正文，绝不能把“审校：”“请检查”“英文”等操作说明送入审校。
+只要清洗后存在可读正文，就默认把它视为待审校译文或目标文本：不要求原文，不要求用户解释翻译方向，返回 source_language 为 none、needs_input 为 false，并依据正文实际语言设置目标语言。界面中的 auto 表示由你判断，不能压过用户本轮自然语言说明。只有清洗后没有任何可审校正文时，才能 needs_input 为 true。
+输出时每个 mapping 必须使用 attachment_id "__direct_text__"、保留其 direct:N target_pointer，并在 target_text 中写入清洗后的正文。只返回严格 JSON，不要输出 Markdown。"""
+
+DIRECT_TEXT_WORKSPACE_USER_PROMPT = """请将这条无附件直接输入整理为审校单元，并返回：
+{{
+  "source_language": "none",
+  "targets": [{{"language":"识别到的正文语言", "mappings":[{{"attachment_id":"__direct_text__", "target_pointer":"direct:1", "target_text":"清洗后的待审校正文"}}]}}],
+  "assumptions": ["说明如何分离指令与正文"], "warnings": [], "confidence": 0.0,
+  "needs_input": false, "question": ""
+}}
+
+界面源语言设置（auto 表示交给你判断）：{source_language}
+界面目标语言设置（auto 表示交给你判断）：{target_languages}
+用户针对本轮内容的补充说明：{adjustment_text}
+用户直接输入（其中可能混有操作说明；只提取真正待审校的正文）：
+---
+{direct_text}
+---"""
+
 def submit_workspace_inspection(
     session_id: str,
     direct_text: str = "",
@@ -429,8 +450,12 @@ def _normalize_direct_text_plan(
         for unit in target.units:
             if str(unit.pointer or "").startswith("direct:"):
                 direct_unit_count += 1
+                agent_language = str(unit.target_language or target.language or "auto").strip()
                 detected = detect_language(unit.target_text)
-                language = _select_target_language(detected, target_languages)
+                language = _select_target_language(
+                    detected if agent_language.lower() in {"", "auto"} else agent_language,
+                    target_languages,
+                )
                 unit.target_language = language
                 unit.source_text = ""
                 unit.source_file = "直接输入"
@@ -443,7 +468,7 @@ def _normalize_direct_text_plan(
         plan.targets = [TargetPlan(language=language, units=regrouped[language]) for language in order]
         if not documents and str(session.get("source_language") or "auto").lower() in {"auto", "none"}:
             plan.source_language = "none"
-        plan.assumptions.append("直接输入内容已按文字脚本确定为待审校译文；没有原文时仅检查译文本身。")
+        plan.assumptions.append("直接输入已由 Workspace Agent 分离操作说明与待审校正文；没有原文时仅检查正文自身。")
 
 def _build_preset_plan(
     session: dict[str, Any],
@@ -766,20 +791,31 @@ def _refine_with_model(
             structure={"paragraph_count": len(direct_blocks)},
             blocks=direct_blocks,
         )
-    manifests = {
-        attachment_id: document.to_manifest(sample_limit=12)
-        for attachment_id, document in analysis_documents.items()
-    }
-    user_prompt = WORKSPACE_USER_PROMPT.format(
-        source_language=session["source_language"],
-        target_languages=json.dumps(session["target_languages"], ensure_ascii=False),
-        adjustment_text=adjustment_text or "无",
-        adjustment_context_json=json.dumps(
-            _workspace_adjustment_context(session["id"], parent_run_id) if adjustment_text.strip() else {},
-            ensure_ascii=False,
-        ),
-        manifest_json=json.dumps(manifests, ensure_ascii=False),
-    )
+    direct_text_only = bool(direct_text.strip()) and not documents
+    if direct_text_only:
+        system_prompt = DIRECT_TEXT_WORKSPACE_SYSTEM_PROMPT
+        user_prompt = DIRECT_TEXT_WORKSPACE_USER_PROMPT.format(
+            source_language=session["source_language"],
+            target_languages=json.dumps(session["target_languages"], ensure_ascii=False),
+            adjustment_text=adjustment_text or "无",
+            direct_text=direct_text.strip(),
+        )
+    else:
+        system_prompt = WORKSPACE_SYSTEM_PROMPT
+        manifests = {
+            attachment_id: document.to_manifest(sample_limit=12)
+            for attachment_id, document in analysis_documents.items()
+        }
+        user_prompt = WORKSPACE_USER_PROMPT.format(
+            source_language=session["source_language"],
+            target_languages=json.dumps(session["target_languages"], ensure_ascii=False),
+            adjustment_text=adjustment_text or "无",
+            adjustment_context_json=json.dumps(
+                _workspace_adjustment_context(session["id"], parent_run_id) if adjustment_text.strip() else {},
+                ensure_ascii=False,
+            ),
+            manifest_json=json.dumps(manifests, ensure_ascii=False),
+        )
     try:
         pending_chunks: list[str] = []
         thinking_chunks: list[str] = []
@@ -823,7 +859,7 @@ def _refine_with_model(
 
         emit_event(session["id"], "workspace.output_started", {"run_id": run_id})
         raw = workspace_chat(
-            [{"role": "system", "content": WORKSPACE_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             on_delta=emit_delta,
         )
         flush_pending()
@@ -912,7 +948,13 @@ def _plan_from_agent(
                 target_pointer=target_pointer,
                 scope=str(mapping.get("scope") or ""),
             )
+            cleaned_direct_text = str(mapping.get("target_text") or "").strip()
             for target_block in target_blocks:
+                target_text = (
+                    cleaned_direct_text
+                    if document.file_type == "direct_text" and cleaned_direct_text
+                    else target_block.text
+                )
                 units.append(
                     ReviewUnit(
                         id=uuid.uuid4().hex,
@@ -923,7 +965,7 @@ def _plan_from_agent(
                             if agent_declares_no_source
                             else source_block.text if source_block else str(target_block.metadata.get("source_text") or "")
                         ),
-                        target_text=target_block.text,
+                        target_text=target_text,
                         source_file=document.filename,
                         pointer=target_block.pointer,
                         metadata={
@@ -931,6 +973,7 @@ def _plan_from_agent(
                             "scope": str(mapping.get("scope") or ""),
                             "source_pointer": source_pointer,
                             "target_pointer": target_block.pointer,
+                            "cleaned_from_direct_input": bool(document.file_type == "direct_text" and cleaned_direct_text),
                         },
                     )
                 )

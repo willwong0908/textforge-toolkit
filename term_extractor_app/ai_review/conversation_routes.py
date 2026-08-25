@@ -56,8 +56,9 @@ class SessionDeletePayload(BaseModel):
     confirm: bool = False
 
 
-class SessionRenamePayload(BaseModel):
-    title: str
+class SessionUpdatePayload(BaseModel):
+    title: str | None = None
+    auto_start: bool | None = None
 
 
 class AttachmentMappingPayload(BaseModel):
@@ -74,6 +75,31 @@ class WorkspaceDecisionPayload(BaseModel):
     question_id: str | None = None
     action: str = "confirm"
     answer: str = ""
+
+
+def _recover_direct_text_for_reinspection(snapshot: dict[str, Any], source_run: dict[str, Any]) -> str:
+    """Recover the original direct text when a Workspace follow-up has no files.
+
+    Direct input is intentionally kept out of cross-message model context.  A
+    follow-up still needs the same payload, however, otherwise the backend used
+    to start a file-less inspection and fail before it could produce a reply.
+    """
+    plan = dict(source_run.get("plan") or {})
+    unit_texts: list[str] = []
+    for target in plan.get("targets") or []:
+        for unit in target.get("units") or []:
+            if str(unit.get("pointer") or "").startswith("direct:"):
+                value = str(unit.get("target_text") or "").strip()
+                if value:
+                    unit_texts.append(value)
+    if unit_texts:
+        return "\n".join(dict.fromkeys(unit_texts))
+    for message in reversed(snapshot.get("messages") or []):
+        if message.get("role") == "user" and message.get("kind") == "message":
+            value = str(message.get("content") or "").strip()
+            if value:
+                return value
+    return ""
 
 
 @router.get("")
@@ -96,12 +122,19 @@ def conversation(session_id: str) -> dict[str, Any]:
 
 
 @router.patch("/{session_id}")
-def rename_conversation(session_id: str, payload: SessionRenamePayload) -> dict[str, Any]:
-    title = payload.title.strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="会话名称不能为空")
+def update_conversation(session_id: str, payload: SessionUpdatePayload) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.title is not None:
+        title = payload.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="会话名称不能为空")
+        updates.update(title=title[:120], title_custom=True)
+    if payload.auto_start is not None:
+        updates["auto_start"] = bool(payload.auto_start)
+    if not updates:
+        raise HTTPException(status_code=400, detail="没有可更新的会话设置")
     try:
-        session = update_session(session_id, title=title[:120], title_custom=True)
+        session = update_session(session_id, **updates)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True, "session": session}
@@ -279,11 +312,18 @@ def submit_decision(session_id: str, payload: WorkspaceDecisionPayload) -> dict[
         if payload.action == "confirm":
             tasks = start_session_review(session_id, payload.run_id)
             return {"ok": True, "tasks": tasks}
+        source_attachment_ids = list((source_run or {}).get("attachment_ids") or [])
+        direct_text = ""
+        if not source_attachment_ids:
+            direct_text = _recover_direct_text_for_reinspection(snapshot, source_run or {})
+            if not direct_text:
+                raise ValueError("未找到本轮直接输入的待审校文本，请重新发送文本后再调整")
         run_id = submit_workspace_inspection(
             session_id,
-            "",
+            direct_text,
             adjustment_text=payload.answer,
-            attachment_ids=list((source_run or {}).get("attachment_ids") or []),
+            attachment_ids=source_attachment_ids,
+            record_user_message=False,
             parent_run_id=str(payload.run_id or ""),
         )
         return {"ok": True, "run_id": run_id}

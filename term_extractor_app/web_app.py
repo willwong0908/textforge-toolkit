@@ -8487,6 +8487,22 @@ async function renameReviewConversation(sessionId, title) {
   return updated;
 }
 
+async function saveReviewConversationAutoStart(enabled) {
+  const sessionId = String(reviewConversationState.currentId || "");
+  if (!sessionId) return;
+  const data = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ auto_start: Boolean(enabled) }),
+  });
+  const updated = data.session || {};
+  const sessionIndex = reviewConversationState.sessions.findIndex((item) => item.id === sessionId);
+  if (sessionIndex >= 0) reviewConversationState.sessions[sessionIndex] = updated;
+  if (reviewConversationState.snapshot?.session?.id === sessionId) {
+    reviewConversationState.snapshot.session = updated;
+  }
+  renderReviewConversationList();
+}
+
 async function openReviewConversation(sessionId) {
   if (!sessionId) return;
   reviewConversationState.currentId = String(sessionId);
@@ -10753,9 +10769,16 @@ $("reviewComposer").addEventListener("drop", (event) => {
   uploadReviewConversationFiles(event.dataTransfer?.files).catch(showReviewConversationError);
 });
 $("sendReviewConversationButton").addEventListener("click", () => sendReviewConversationMessage().catch(showReviewConversationError));
+$("reviewAutoStart").addEventListener("change", (event) => {
+  saveReviewConversationAutoStart(event.currentTarget.checked).catch((error) => {
+    event.currentTarget.checked = Boolean(reviewConversationState.snapshot?.session?.auto_start);
+    showReviewConversationError(error);
+  });
+});
 $("reviewComposerInput").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
+    if ($("sendReviewConversationButton").disabled) return;
     sendReviewConversationMessage().catch(showReviewConversationError);
   }
 });

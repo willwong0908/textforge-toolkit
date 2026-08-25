@@ -22,6 +22,24 @@ from term_extractor_app.ai_review.workspace_service import (
 
 def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     prompt = messages[-1]["content"]
+    if "用户直接输入（其中可能混有操作说明；只提取真正待审校的正文）" in prompt:
+        direct_text = prompt.split("\n---\n", 1)[1].rsplit("\n---", 1)[0].strip()
+        mappings = []
+        for index, value in enumerate([part.strip() for part in direct_text.split("\n") if part.strip()], 1):
+            cleaned = value.split("：", 1)[-1].strip() if "：" in value else value
+            language = "简体中文" if any("\u4e00" <= char <= "\u9fff" for char in cleaned) else "英语"
+            mappings.append({"language": language, "mappings": [{
+                "attachment_id": "__direct_text__", "target_pointer": f"direct:{index}", "target_text": cleaned,
+            }]})
+        response = json.dumps({
+            "source_language": "none",
+            "targets": mappings,
+            "assumptions": ["已分离操作说明与正文。"], "warnings": [], "confidence": 0.97,
+            "needs_input": False, "question": "",
+        }, ensure_ascii=False)
+        if on_delta:
+            on_delta(response)
+        return response
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
     targets: list[dict[str, object]] = []
     for attachment_id, manifest in manifests.items():
@@ -56,12 +74,9 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
 
 
 def _workspace_auto_direct_response(messages: list[dict[str, str]], on_delta=None) -> str:
-    prompt = messages[-1]["content"]
-    manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
-    attachment_id = next(iter(manifests))
     response = json.dumps({
-        "source_language": "auto",
-        "targets": [{"language": "auto", "mappings": [{"attachment_id": attachment_id, "target_pointer": "direct:1"}]}],
+        "source_language": "none",
+        "targets": [{"language": "auto", "mappings": [{"attachment_id": "__direct_text__", "target_pointer": "direct:1"}]}],
         "assumptions": [], "warnings": [], "confidence": 0.97,
         "needs_input": False, "question": "",
     }, ensure_ascii=False)
@@ -214,6 +229,22 @@ class WorkspaceSessionTests(unittest.TestCase):
         self.assertEqual([target["language"] for target in plan["targets"]], ["中文"])
         self.assertEqual(plan["targets"][0]["units"][0]["target_language"], "中文")
         self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "")
+
+    def test_direct_text_workspace_strips_audit_instruction_from_review_payload(self) -> None:
+        session = session_store.create_session(source_language="auto", target_languages=["auto"])
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+            side_effect=_workspace_response,
+        ) as workspace_mock:
+            plan = inspect_workspace_sync(session["id"], "审校英文：Hi, Biby, I love you. Would you love me?")
+        prompt = workspace_mock.call_args.args[0][-1]["content"]
+        self.assertIn("用户直接输入", prompt)
+        self.assertNotIn("结构清单：", prompt)
+        self.assertEqual(plan["source_language"], "none")
+        self.assertEqual(plan["targets"][0]["units"][0]["target_text"], "Hi, Biby, I love you. Would you love me?")
 
     def test_agent_no_source_docx_expands_document_pointer_to_all_paragraphs(self) -> None:
         docx_path = Path(self.temp.name) / "translation.docx"

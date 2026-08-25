@@ -22,6 +22,21 @@ workspace_prompts: list[str] = []
 def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     prompt = messages[-1]["content"]
     workspace_prompts.append(prompt)
+    if "用户直接输入（其中可能混有操作说明；只提取真正待审校的正文）" in prompt:
+        direct_text = prompt.split("\n---\n", 1)[1].rsplit("\n---", 1)[0].strip()
+        cleaned = direct_text.split("：", 1)[-1].strip() if "：" in direct_text else direct_text
+        response = json.dumps({
+            "source_language": "none",
+            "targets": [{"language": "英语", "mappings": [{
+                "attachment_id": "__direct_text__", "target_pointer": "direct:1", "target_text": cleaned,
+            }]}],
+            "assumptions": ["已分离操作说明与正文。"], "warnings": [], "confidence": 0.97,
+            "needs_input": False, "question": "",
+        }, ensure_ascii=False)
+        if on_delta:
+            on_delta("正在整理直接输入。", "reasoning")
+            on_delta(response, "content")
+        return response
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
     attachment_id = next(iter(manifests))
     if "没有原文" in prompt:
@@ -182,6 +197,20 @@ class ConversationApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_auto_start_is_saved_per_session_immediately(self) -> None:
+        first_session = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        second_session = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        updated = self.client.patch(
+            f"/api/ai-review/conversations/{first_session}",
+            json={"auto_start": True},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(updated.json()["session"]["auto_start"])
+        first_snapshot = self.client.get(f"/api/ai-review/conversations/{first_session}").json()
+        second_snapshot = self.client.get(f"/api/ai-review/conversations/{second_session}").json()
+        self.assertTrue(first_snapshot["session"]["auto_start"])
+        self.assertFalse(second_snapshot["session"]["auto_start"])
+
     def test_starting_new_workspace_run_supersedes_old_pending_question(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
         first_run = session_store.create_workspace_run(
@@ -208,6 +237,32 @@ class ConversationApiTests(unittest.TestCase):
         )
         self.assertEqual(question["recommended_label"], "")
         self.assertEqual(question["recommended_value"], "")
+
+    def test_direct_text_followup_reuses_original_payload_and_returns_a_new_workspace_reply(self) -> None:
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        session_store.add_message(session_id, "user", "message", "审校英文：Hi, Biby, I love you. Would you love me?")
+        first_run = session_store.create_workspace_run(session_id, model="configured-model", input_signature="direct-input")
+        session_store.update_workspace_run(
+            first_run["id"],
+            status="needs_input",
+            plan={"source_language": "auto", "targets": [], "needs_input": True, "question": "请说明文本用途。"},
+        )
+        question = session_store.create_question(session_id, first_run["id"], "请说明文本用途。", recommended_label="")
+        response = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/decision",
+            json={"run_id": first_run["id"], "question_id": question["id"], "action": "other", "answer": "直接审校"},
+        )
+        self.assertEqual(response.status_code, 200)
+        for _ in range(80):
+            snapshot = self.client.get(f"/api/ai-review/conversations/{session_id}").json()
+            if len(snapshot["workspace_runs"]) >= 2 and snapshot["workspace_runs"][0]["status"] == "ready":
+                break
+            time.sleep(0.05)
+        self.assertEqual(snapshot["workspace_runs"][0]["status"], "ready")
+        plan = snapshot["workspace_runs"][0]["plan"]
+        self.assertEqual(plan["source_language"], "none")
+        self.assertEqual(plan["targets"][0]["units"][0]["target_text"], "Hi, Biby, I love you. Would you love me?")
+        self.assertTrue(any(item["kind"] == "workspace_report" for item in snapshot["messages"]))
 
     def test_pending_attachment_can_be_removed_and_source_can_be_none(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
