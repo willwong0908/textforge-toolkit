@@ -1639,6 +1639,28 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"file_path": selected or "", "cancelled": not bool(selected)}
 
+    @app.get("/api/dialog/select-review-files")
+    async def select_review_files():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected = filedialog.askopenfilenames(
+                title="选择待审校文件",
+                filetypes=[
+                    ("支持的文件", "*.xlsx *.xlsm *.xlf *.xliff *.csv *.tsv *.txt *.md *.docx *.pptx *.pdf *.json *.xml"),
+                    ("所有文件", "*.*"),
+                ],
+            )
+            root.destroy()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        paths = [str(path) for path in selected if str(path)]
+        return {"file_paths": paths, "cancelled": not bool(paths)}
+
     @app.post("/api/ai-review/file/open")
     async def ai_review_open_file(payload: AIReviewOpenFilePayload):
         file_path = str(payload.file_path or "").strip()
@@ -2236,21 +2258,6 @@ INDEX_HTML = """<!doctype html>
           </div>
         </details>
       </nav>
-      <div class="sidebar-status">
-        <div class="sidebar-status-heading">
-          <span>运行状态</span>
-          <span class="sidebar-local-badge">本地</span>
-        </div>
-        <div class="status-block">
-          <small class="status-caption">当前模块</small>
-          <strong id="taskTypeLabel">文本预处理工具</strong>
-        </div>
-        <div class="status-block">
-          <div class="status-line"><span id="statusPill" class="pill">空闲</span><strong id="stageLabel">未启动</strong></div>
-          <small id="statusMessage">等待开始任务</small>
-        </div>
-        <small class="service-tip"><span>服务</span><code>127.0.0.1:8765</code></small>
-      </div>
       <div class="sidebar-actions-panel">
         <button id="feedbackEntryButton" class="feedback-entry-button" type="button">我要反馈</button>
       </div>
@@ -5472,6 +5479,8 @@ button:disabled { opacity: .48; }
 .modal-header p, .dialog-head p { color: #a5b5ca; }
 .modal-close, .review-mapping-close { border: 1px solid rgba(116,149,202,.30); border-radius: 5px; background: rgba(89,116,167,.15); color: #b7c8e2; }
 .modal-close:hover, .review-mapping-close:hover { background: rgba(89,116,167,.28); color: #fff; }
+.skip-link { border-color: rgba(130,165,236,.72); border-radius: 5px; background: rgba(13,27,50,.97); color: #dbe9ff; box-shadow: 0 10px 30px rgba(0,0,0,.38); }
+.skip-link:focus { box-shadow: 0 0 0 3px rgba(110,158,255,.24), 0 10px 30px rgba(0,0,0,.38); }
 .dialog-body {
   border: 1px solid rgba(122,154,208,.46);
   border-radius: var(--radius-lg);
@@ -6149,7 +6158,6 @@ function setPage(pageId) {
   document.querySelectorAll(".nav-link").forEach((button) => {
     button.classList.toggle("active", button.dataset.pageTarget === pageId);
   });
-  $("taskTypeLabel").textContent = PAGE_TASK_LABELS[pageId] || "文本预处理工具";
   const heroCopy = PAGE_HERO_COPY[pageId] || PAGE_HERO_COPY.overviewPage;
   $("heroTitle").textContent = heroCopy.title;
   $("heroLede").textContent = heroCopy.lede;
@@ -6214,11 +6222,16 @@ function renderToolGuide(toolKey = "textPreprocess") {
 }
 
 function renderTaskStatus(taskLabel, pillText, pillClass, stageLabel, message) {
-  $("taskTypeLabel").textContent = taskLabel || "文本预处理工具";
-  $("statusPill").textContent = pillText || "空闲";
-  $("statusPill").className = `pill ${pillClass || ""}`.trim();
-  $("stageLabel").textContent = stageLabel || "未启动";
-  $("statusMessage").textContent = message || "等待开始任务";
+  const taskTypeLabel = $("taskTypeLabel");
+  const statusPill = $("statusPill");
+  const stageLabelNode = $("stageLabel");
+  const statusMessage = $("statusMessage");
+  if (!taskTypeLabel || !statusPill || !stageLabelNode || !statusMessage) return;
+  taskTypeLabel.textContent = taskLabel || "文本预处理工具";
+  statusPill.textContent = pillText || "空闲";
+  statusPill.className = `pill ${pillClass || ""}`.trim();
+  stageLabelNode.textContent = stageLabel || "未启动";
+  statusMessage.textContent = message || "等待开始任务";
 }
 
 function clearFeedbackForm() {
@@ -8270,13 +8283,13 @@ function renderReviewMessages(messages, questions) {
       const files = document.createElement("div");
       files.className = "review-message-files";
       attachments.forEach((attachment) => {
-        const link = document.createElement("a");
-        link.className = "review-message-file";
-        link.href = `/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachment.id)}/file`;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.textContent = `▤ ${attachment.original_filename || "文件"}`;
-        files.appendChild(link);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "review-message-file";
+        button.title = attachment.original_path ? "打开原始文件" : "此文件由拖拽/网页上传，未记录原始路径";
+        button.textContent = `▤ ${attachment.original_filename || "文件"}`;
+        button.addEventListener("click", () => openReviewConversationAttachmentOriginal(attachment.id).catch(showReviewConversationError));
+        files.appendChild(button);
       });
       item.appendChild(files);
     }
@@ -8503,6 +8516,31 @@ async function uploadReviewConversationFiles(files) {
   if (!response.ok) throw new Error(data.detail || data.message || "文件上传失败");
   $("reviewConversationHint").textContent = "文件已添加";
   await refreshCurrentReviewConversation();
+}
+
+async function chooseReviewConversationFiles() {
+  const data = await api("/api/dialog/select-review-files");
+  const paths = Array.isArray(data.file_paths) ? data.file_paths.filter(Boolean) : [];
+  if (!paths.length) return;
+  if (!reviewConversationState.currentId) await createReviewConversation();
+  $("reviewConversationHint").textContent = `正在添加 ${paths.length} 个文件…`;
+  for (const filePath of paths) {
+    await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/local`, {
+      method: "POST",
+      body: JSON.stringify({ file_path: filePath }),
+    });
+  }
+  $("reviewConversationHint").textContent = "文件已添加，可在对话中溯源打开原文件";
+  await refreshCurrentReviewConversation();
+}
+
+async function openReviewConversationAttachmentOriginal(attachmentId) {
+  if (!reviewConversationState.currentId || !attachmentId) throw new Error("附件不存在");
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachmentId)}/open-original`, {
+    method: "POST",
+    body: "{}",
+  });
+  $("reviewConversationHint").textContent = "已打开原始文件";
 }
 
 async function sendReviewConversationMessage() {
@@ -10267,7 +10305,7 @@ $("editReviewAttachmentMappingButton").addEventListener("click", () => openRevie
 document.querySelectorAll('input[name="reviewAttachmentMappingMode"]').forEach((input) => {
   input.addEventListener("change", updateReviewAttachmentMappingControls);
 });
-$("reviewUploadChip").addEventListener("click", () => $("reviewConversationFileInput").click());
+$("reviewUploadChip").addEventListener("click", () => chooseReviewConversationFiles().catch(showReviewConversationError));
 $("reviewConversationFileInput").addEventListener("change", () => {
   const files = $("reviewConversationFileInput").files;
   uploadReviewConversationFiles(files).catch(showReviewConversationError).finally(() => ($("reviewConversationFileInput").value = ""));

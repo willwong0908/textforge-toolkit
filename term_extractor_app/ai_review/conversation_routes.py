@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .session_store import (
@@ -31,6 +31,7 @@ from .readers import ReaderError, build_default_registry
 from .workflow_service import get_session_task_results, start_session_review
 from .workspace_service import submit_workspace_inspection
 from ..telemetry import track_event
+from ..open_utils import open_path
 
 
 router = APIRouter(prefix="/api/ai-review/conversations", tags=["ai-review-conversations"])
@@ -63,6 +64,10 @@ class SessionRenamePayload(BaseModel):
 class AttachmentMappingPayload(BaseModel):
     mode: str = "ai"
     preset_id: str | None = None
+
+
+class LocalAttachmentPayload(BaseModel):
+    file_path: str
 
 
 class WorkspaceDecisionPayload(BaseModel):
@@ -132,6 +137,27 @@ async def upload_attachments(session_id: str, files: list[UploadFile] = File(...
     return {"attachments": result}
 
 
+@router.post("/{session_id}/attachments/local")
+def attach_local_file(session_id: str, payload: LocalAttachmentPayload) -> dict[str, Any]:
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="审校会话不存在")
+    path = Path(str(payload.file_path or "").strip())
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="找不到原始文件，无法添加。")
+    try:
+        attachment = add_attachment(
+            session_id,
+            path.name,
+            path.read_bytes(),
+            original_path=str(path),
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"读取原始文件失败：{exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"attachment": attachment}
+
+
 @router.patch("/{session_id}/attachments/{attachment_id}")
 def configure_attachment_mapping(
     session_id: str, attachment_id: str, payload: AttachmentMappingPayload
@@ -197,13 +223,22 @@ def remove_pending_attachment(session_id: str, attachment_id: str) -> dict[str, 
     return {"ok": True}
 
 
-@router.get("/{session_id}/attachments/{attachment_id}/file")
-def open_conversation_attachment(session_id: str, attachment_id: str) -> FileResponse:
+@router.post("/{session_id}/attachments/{attachment_id}/open-original")
+def open_conversation_attachment_original(session_id: str, attachment_id: str) -> dict[str, Any]:
     attachment = get_attachment(attachment_id)
     if not attachment or attachment["session_id"] != session_id:
         raise HTTPException(status_code=404, detail="附件不存在")
-    path = str(attachment.get("stored_path") or "")
-    return FileResponse(path, filename=attachment["original_filename"])
+    original_path_text = str(attachment.get("original_path") or "").strip()
+    if not original_path_text:
+        raise HTTPException(status_code=404, detail="未记录原始文件路径，无法溯源打开。")
+    original_path = Path(original_path_text)
+    if not original_path.exists() or not original_path.is_file():
+        raise HTTPException(status_code=404, detail=f"找不到原始文件：{original_path}")
+    try:
+        open_path(original_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开原始文件失败：{exc}") from exc
+    return {"ok": True, "file_path": str(original_path)}
 
 
 @router.post("/{session_id}/messages")

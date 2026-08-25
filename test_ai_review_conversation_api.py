@@ -116,11 +116,12 @@ class ConversationApiTests(unittest.TestCase):
         self.assertIsNotNone(snapshot["attachments"][0]["sent_at"])
         attachment_message = next(item for item in snapshot["messages"] if item["kind"] == "attachment_message")
         self.assertEqual(attachment_message["payload"]["attachments"][0]["id"], uploaded_id)
-        opened = self.client.get(
-            f"/api/ai-review/conversations/{session_id}/attachments/{uploaded_id}/file"
+        opened = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments/{uploaded_id}/open-original",
+            json={},
         )
-        self.assertEqual(opened.status_code, 200)
-        self.assertIn(b"Source", opened.content)
+        self.assertEqual(opened.status_code, 404)
+        self.assertIn("未记录原始文件路径", opened.json()["detail"])
         event_types = {item["event_type"] for item in session_store.get_events(session_id)}
         self.assertIn("workspace.output_started", event_types)
         self.assertIn("workspace.delta", event_types)
@@ -143,7 +144,11 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual(adjusted.status_code, 200)
         for _ in range(40):
             snapshot = self.client.get(f"/api/ai-review/conversations/{session_id}").json()
-            if len(snapshot["workspace_runs"]) >= 2 and snapshot["workspace_runs"][0]["status"] == "ready":
+            if (
+                len(snapshot["workspace_runs"]) >= 2
+                and snapshot["workspace_runs"][0]["status"] == "ready"
+                and any(item["status"] == "pending" for item in snapshot["questions"])
+            ):
                 break
             time.sleep(0.05)
         adjusted_plan = snapshot["workspace_runs"][0]["plan"]
@@ -161,6 +166,31 @@ class ConversationApiTests(unittest.TestCase):
         )
         self.assertEqual(delete.status_code, 200)
         self.assertEqual(self.client.get(f"/api/ai-review/conversations/{session_id}").status_code, 404)
+
+    def test_local_attachment_opens_original_file_and_reports_when_missing(self) -> None:
+        original_path = Path(self.temp.name) / "original.csv"
+        original_path.write_text("Source,Target\nHello,你好\n", encoding="utf-8")
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        attached = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments/local",
+            json={"file_path": str(original_path)},
+        )
+        self.assertEqual(attached.status_code, 200)
+        attachment_id = attached.json()["attachment"]["id"]
+        with patch("term_extractor_app.ai_review.conversation_routes.open_path") as open_path:
+            opened = self.client.post(
+                f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/open-original",
+                json={},
+            )
+        self.assertEqual(opened.status_code, 200)
+        open_path.assert_called_once_with(original_path.resolve())
+        original_path.unlink()
+        missing = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/open-original",
+            json={},
+        )
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("找不到原始文件", missing.json()["detail"])
 
     def test_delete_requires_confirmation(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]

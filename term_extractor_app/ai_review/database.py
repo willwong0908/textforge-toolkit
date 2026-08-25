@@ -255,6 +255,7 @@ def init_db() -> None:
                 session_id TEXT NOT NULL,
                 original_filename TEXT NOT NULL,
                 stored_path TEXT NOT NULL,
+                original_path TEXT,
                 file_type TEXT NOT NULL DEFAULT '',
                 file_hash TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -400,6 +401,8 @@ def init_db() -> None:
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_attachments)").fetchall()
         }
+        if "original_path" not in attachment_columns:
+            conn.execute("ALTER TABLE review_attachments ADD COLUMN original_path TEXT")
         if "mapping_mode" not in attachment_columns:
             conn.execute("ALTER TABLE review_attachments ADD COLUMN mapping_mode TEXT NOT NULL DEFAULT 'ai'")
         if "mapping_preset_id" not in attachment_columns:
