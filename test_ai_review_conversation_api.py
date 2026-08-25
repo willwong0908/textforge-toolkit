@@ -189,6 +189,15 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual(first["status"], "superseded")
         self.assertEqual(len([item for item in questions if item["status"] == "pending"]), 1)
 
+    def test_needs_input_question_has_no_false_confirmation(self) -> None:
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        run = session_store.create_workspace_run(session_id, model="configured-model", input_signature="needs-input")
+        question = session_store.create_question(
+            session_id, run["id"], "请补充译文位置", recommended_label=""
+        )
+        self.assertEqual(question["recommended_label"], "")
+        self.assertEqual(question["recommended_value"], "")
+
     def test_pending_attachment_can_be_removed_and_source_can_be_none(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
         upload = self.client.post(

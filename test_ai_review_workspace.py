@@ -59,6 +59,21 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     return response
 
 
+def _workspace_auto_direct_response(messages: list[dict[str, str]], on_delta=None) -> str:
+    prompt = messages[-1]["content"]
+    manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
+    attachment_id = next(iter(manifests))
+    response = json.dumps({
+        "content_files": [attachment_id], "reference_files": [], "source_language": "auto",
+        "targets": [{"language": "auto", "mappings": [{"attachment_id": attachment_id, "target_pointer": "direct:1"}]}],
+        "relationships": [], "assumptions": [], "warnings": [], "confidence": 0.97,
+        "needs_input": False, "question": "",
+    }, ensure_ascii=False)
+    if on_delta:
+        on_delta(response)
+    return response
+
+
 class ReaderRegistryTests(unittest.TestCase):
     def test_stream_reasoning_delta_is_exposed(self) -> None:
         payload = {"choices": [{"delta": {"reasoning_content": "正在判断工作表"}}]}
@@ -188,6 +203,21 @@ class WorkspaceSessionTests(unittest.TestCase):
         units = [unit for target in plan["targets"] for unit in target["units"]]
         self.assertEqual(len(units), 2)
         self.assertTrue(all(unit["source_text"] == "" for unit in units))
+
+    def test_direct_chinese_text_never_keeps_auto_as_a_review_language(self) -> None:
+        session = session_store.create_session(source_language="auto", target_languages=["auto"])
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+            side_effect=_workspace_auto_direct_response,
+        ):
+            plan = inspect_workspace_sync(session["id"], "这是需要审校的中文文本。")
+        self.assertEqual(plan["source_language"], "none")
+        self.assertEqual([target["language"] for target in plan["targets"]], ["中文"])
+        self.assertEqual(plan["targets"][0]["units"][0]["target_language"], "中文")
+        self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "")
 
     def test_xliff_is_the_only_local_only_fast_path(self) -> None:
         session = session_store.create_session(target_languages=["简体中文"])

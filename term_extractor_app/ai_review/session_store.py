@@ -358,16 +358,23 @@ def update_workspace_run(run_id: str, *, status: str, plan: dict[str, Any] | Non
         )
 
 
-def create_question(session_id: str, run_id: str, prompt: str, recommended_value: str) -> dict[str, Any]:
+def create_question(
+    session_id: str,
+    run_id: str,
+    prompt: str,
+    recommended_value: str = "",
+    *,
+    recommended_label: str = "确认推荐方案",
+) -> dict[str, Any]:
     question_id = uuid.uuid4().hex
     with get_connection() as conn:
         conn.execute(
             """
             INSERT INTO workspace_questions (
                 id, session_id, run_id, prompt, recommended_label, recommended_value, status, created_at
-            ) VALUES (?, ?, ?, ?, '确认推荐方案', ?, 'pending', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
-            (question_id, session_id, run_id, prompt, recommended_value, utc_now()),
+            (question_id, session_id, run_id, prompt, recommended_label, recommended_value, utc_now()),
         )
         row = conn.execute("SELECT * FROM workspace_questions WHERE id = ?", (question_id,)).fetchone()
     question = _question_to_dict(row)

@@ -211,7 +211,7 @@ def _inspect(
         plan_data["file_summaries"] = _build_file_summaries(plan_data, documents)
         update_workspace_run(run_id, status="needs_input", plan=plan_data)
         update_session(session_id, status="needs_input")
-        create_question(session_id, run_id, plan.question, "忽略不支持的文件并继续")
+        create_question(session_id, run_id, plan.question, recommended_label="")
         add_message(session_id, "assistant", "workspace_report", _format_report(plan_data), plan_data)
         track_event("task_question.ai_review_workspace")
         return plan_data
@@ -267,6 +267,8 @@ def _inspect(
             else:
                 plan.question = "Workspace Agent 未能完成文件关系和正文位置判断。请检查模型配置后重试，或补充文件名、工作表及原文/译文所在列。"
                 plan.warnings.append("下方内容只是 Reader 生成的本地候选映射，尚未经过 Workspace Agent 确认。")
+    if direct_text.strip():
+        _normalize_direct_text_plan(plan, session, documents)
     _attach_references(plan, documents)
     plan_data = plan.to_dict()
     plan_data["cache_hit"] = cache_hit
@@ -281,7 +283,12 @@ def _inspect(
     add_message(session_id, "assistant", "workspace_report", _format_report(plan_data), message_payload)
     emit_event(session_id, f"workspace.{state}", {"run_id": run_id, "plan": plan_data})
     if plan.needs_input:
-        create_question(session_id, run_id, plan.question or "无法确定待审校内容，请补充说明。", "采用推荐识别结果")
+        create_question(
+            session_id,
+            run_id,
+            plan.question or "无法确定待审校内容，请补充说明。",
+            recommended_label="",
+        )
         track_event("task_question.ai_review_workspace")
     else:
         track_event("task_success.ai_review_workspace")
@@ -399,6 +406,40 @@ def _build_deterministic_plan(
         needs_input=total_units == 0,
         question="无法识别待审校译文，请说明文件关系或正文位置。" if total_units == 0 else "",
     )
+
+
+def _normalize_direct_text_plan(
+    plan: ExtractionPlan, session: dict[str, Any], documents: dict[str, ReaderDocument]
+) -> None:
+    """Prevent an Agent's placeholder `auto` from becoming a real review language.
+
+    Direct input is always review content.  It has no source counterpart unless a
+    source was explicitly supplied elsewhere, so its detected script must become
+    the target language before a task is created.
+    """
+    target_languages = list(session.get("target_languages") or ["auto"])
+    regrouped: dict[str, list[ReviewUnit]] = defaultdict(list)
+    order: list[str] = []
+    direct_unit_count = 0
+    for target in plan.targets:
+        for unit in target.units:
+            if str(unit.pointer or "").startswith("direct:"):
+                direct_unit_count += 1
+                detected = detect_language(unit.target_text)
+                language = _select_target_language(detected, target_languages)
+                unit.target_language = language
+                unit.source_text = ""
+                unit.source_file = "直接输入"
+            else:
+                language = str(unit.target_language or target.language or "auto")
+            if language not in regrouped:
+                order.append(language)
+            regrouped[language].append(unit)
+    if direct_unit_count:
+        plan.targets = [TargetPlan(language=language, units=regrouped[language]) for language in order]
+        if not documents and str(session.get("source_language") or "auto").lower() in {"auto", "none"}:
+            plan.source_language = "none"
+        plan.assumptions.append("直接输入内容已按文字脚本确定为待审校译文；没有原文时仅检查译文本身。")
 
 
 def _build_preset_plan(

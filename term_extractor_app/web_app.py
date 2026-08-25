@@ -2160,6 +2160,7 @@ INDEX_HTML = """<!doctype html>
   <link rel="stylesheet" href="/assets/app.css" />
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">跳到主内容</a>
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
@@ -2217,27 +2218,29 @@ INDEX_HTML = """<!doctype html>
         </details>
       </nav>
       <div class="sidebar-status">
+        <div class="sidebar-status-heading">
+          <span>运行状态</span>
+          <span class="sidebar-local-badge">本地</span>
+        </div>
         <div class="status-block">
-          <small class="status-caption">当前任务</small>
+          <small class="status-caption">当前模块</small>
           <strong id="taskTypeLabel">文本预处理工具</strong>
         </div>
         <div class="status-block">
-          <small class="status-caption">任务状态</small>
-          <span id="statusPill" class="pill">空闲</span>
-          <strong id="stageLabel">未启动</strong>
+          <div class="status-line"><span id="statusPill" class="pill">空闲</span><strong id="stageLabel">未启动</strong></div>
           <small id="statusMessage">等待开始任务</small>
         </div>
-        <small class="service-tip">服务地址：<code>http://127.0.0.1:8765</code></small>
+        <small class="service-tip"><span>服务</span><code>127.0.0.1:8765</code></small>
       </div>
       <div class="sidebar-actions-panel">
         <button id="feedbackEntryButton" class="feedback-entry-button" type="button">我要反馈</button>
       </div>
     </aside>
 
-    <main class="content">
+    <main id="mainContent" class="content" tabindex="-1">
       <header class="hero">
         <div>
-          <p class="eyebrow">WebUI</p>
+          <div class="hero-context"><span class="eyebrow">本地工作台</span><span class="hero-context-divider"></span><span>Localization &amp; Text Tooling</span></div>
           <h1 id="heroTitle">工具说明</h1>
           <p id="heroLede" class="lede">先了解每个工具能做什么，再开始任务。</p>
           <button id="updateNoticeButton" class="notice-button update-notice-button" type="button" hidden>
@@ -2252,12 +2255,28 @@ INDEX_HTML = """<!doctype html>
       </header>
 
       <section id="toolGuidePage" class="page-section active">
-        <div class="inline-notice">本工具会统计匿名的功能触发次数，不收集文本内容、文件名、路径、账号或密钥等敏感信息。</div>
+        <div class="inline-notice" role="note"><span class="inline-notice-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 10.5v5M12 7.5h.01"></path></svg></span><span><strong>隐私优先</strong>仅统计匿名功能触发次数；不会收集文本、文件名、路径、账号或密钥。</span></div>
         <div class="tool-guide-grid">
-          <button class="tool-guide-card" type="button" data-tool-guide="textPreprocess">文本预处理工具</button>
-          <button class="tool-guide-card" type="button" data-tool-guide="diffExcel">Diff 工具</button>
-          <button class="tool-guide-card" type="button" data-tool-guide="aiReview">AI 审校工具</button>
-          <button class="tool-guide-card" type="button" data-tool-guide="crossExcel">跨Excel搜索与合并</button>
+          <button class="tool-guide-card tool-guide-card-preprocess" type="button" data-tool-guide="textPreprocess" aria-label="打开文本预处理工具说明">
+            <span class="tool-guide-card-top"><span class="tool-guide-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6.5 3.5h7l4 4v13h-11z"></path><path d="M13.5 3.5v4h4M8.5 12h7M8.5 15.5h7"></path></svg></span><span class="tool-guide-badge">批量处理</span></span>
+            <span class="tool-guide-card-copy"><strong>文本预处理</strong><small>从本地表格中提取术语、非译元素和可复用规则。</small></span>
+            <span class="tool-guide-card-footer"><span>目录级工作流</span><span class="tool-guide-arrow" aria-hidden="true">→</span></span>
+          </button>
+          <button class="tool-guide-card tool-guide-card-diff" type="button" data-tool-guide="diffExcel" aria-label="打开 Diff 工具说明">
+            <span class="tool-guide-card-top"><span class="tool-guide-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 4v12M17 8v12M4 7l3-3 3 3M14 17l3 3 3-3"></path><path d="M9 7h5M10 17h4"></path></svg></span><span class="tool-guide-badge">Excel</span></span>
+            <span class="tool-guide-card-copy"><strong>Diff 工具</strong><small>比较文件或目录差异，快速定位改动。</small></span>
+            <span class="tool-guide-card-footer"><span>差异预览与导出</span><span class="tool-guide-arrow" aria-hidden="true">→</span></span>
+          </button>
+          <button class="tool-guide-card tool-guide-card-review" type="button" data-tool-guide="aiReview" aria-label="打开 AI 审校工具说明">
+            <span class="tool-guide-card-top"><span class="tool-guide-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5 13.7 8l4.8 1.6-4.2 2.6.1 5-4.4-2.7-4.2 2.7.1-5-4.2-2.6L6.3 8z"></path><path d="m17.5 17.5 1 1 2-2"></path></svg></span><span class="tool-guide-badge tool-guide-badge-ai">Agent</span></span>
+            <span class="tool-guide-card-copy"><strong>AI 审校</strong><small>让 Workspace Agent 识别结构，再按目标语言独立审校。</small></span>
+            <span class="tool-guide-card-footer"><span>流式会话工作台</span><span class="tool-guide-arrow" aria-hidden="true">→</span></span>
+          </button>
+          <button class="tool-guide-card tool-guide-card-excel" type="button" data-tool-guide="crossExcel" aria-label="打开跨 Excel 搜索与合并工具说明">
+            <span class="tool-guide-card-top"><span class="tool-guide-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="1.5"></rect><path d="M4 10h16M10 4v16M14 10v10"></path></svg></span><span class="tool-guide-badge">多文件</span></span>
+            <span class="tool-guide-card-copy"><strong>跨 Excel</strong><small>跨文件搜索和按表头合并。</small></span>
+            <span class="tool-guide-card-footer"><span>搜索与合并</span><span class="tool-guide-arrow" aria-hidden="true">→</span></span>
+          </button>
         </div>
       </section>
 
@@ -2969,22 +2988,17 @@ INDEX_HTML = """<!doctype html>
         <div class="grid one">
           <section class="card">
             <div class="card-title">
-              <h3>Agent 与 Workflow</h3>
+              <h3>参数设置</h3>
               <p>Workspace Agent 与 Task Workflow 统一使用“模型设置”中的当前模型和 API 配置。</p>
             </div>
             <div class="grid two">
-              <label>思考强度<select id="reviewReasoningEffort"><option value="low">低 · 更快</option><option value="high">高 · 更稳</option><option value="max">最高 · 更慢</option></select></label>
+              <label>思考强度<select id="reviewReasoningEffort"><option value="low">低</option><option value="high">中</option><option value="max">高</option></select></label>
               <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
               <label>单包字符预算<input id="reviewAiLimit" type="number" min="1000" value="20000" /></label>
               <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="80" /></label>
             </div>
             <div class="actions">
               <button id="saveReviewAgentSettingsButton" class="primary" type="button">保存设置</button>
-            </div>
-            <div class="notice-list">
-              <div>Workspace 与 Workflow 始终启用模型思考，默认使用低强度以缩短等待时间。</div>
-              <div>并发上限直接使用当前 Provider 的真实并发配置。</div>
-              <div>调试请求内容默认关闭，避免大量日志拖慢任务。</div>
             </div>
             <span id="reviewSettingsHint" class="hint"></span>
             <div class="hidden" aria-hidden="true">
@@ -4967,6 +4981,231 @@ dialog.modal::backdrop { background: rgba(20, 31, 48, .38); backdrop-filter: blu
   .review-language-options { grid-template-columns: 1fr 1fr; }
   .review-decision-other-row { align-items: stretch; flex-direction: column; }
   .review-decision-other-row input { min-width: 0; width: 100%; }
+}
+
+/* UI/UX Pro Max design system — local B2B productivity workspace */
+:root {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --panel-subtle: #f8fafc;
+  --ink: #0f172a;
+  --muted: #526174;
+  --line: #dbe3ec;
+  --line-strong: #c6d2df;
+  --primary: #0369a1;
+  --primary-strong: #075985;
+  --primary-soft: #eaf4fb;
+  --danger: #b42318;
+  --success: #147a5f;
+  --shadow: none;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+html { background: var(--bg); }
+body {
+  min-width: 320px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Inter, "Microsoft YaHei UI", "Segoe UI", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+button, summary, [role="button"] { cursor: pointer; }
+button:hover:not(:disabled), .nav-link:hover, .tool-guide-card:hover { transform: none; }
+:where(button, input, select, textarea, summary, a):focus-visible {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(14, 165, 233, .15);
+}
+.skip-link {
+  position: fixed;
+  z-index: 100;
+  top: 12px;
+  left: 12px;
+  padding: 8px 12px;
+  border: 1px solid #0ea5e9;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  color: #075985;
+  font-weight: 750;
+  transform: translateY(-160%);
+  transition: transform .16s ease-out;
+}
+.skip-link:focus { transform: translateY(0); }
+.shell { grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
+.sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  min-height: 100vh;
+  max-height: 100vh;
+  flex-direction: column;
+  padding: 20px 14px 16px;
+  overflow-y: auto;
+  background: #fff;
+  border-right: 1px solid var(--line);
+  backdrop-filter: none;
+}
+.brand { gap: 10px; margin: 0 6px 24px; }
+.brand-mark { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 8px; box-shadow: none; }
+.brand-copy { gap: 1px; }
+.brand-version { order: 3; padding: 0; background: transparent; color: #64748b; font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.brand strong { font-size: 15px; letter-spacing: -.02em; }
+.brand small { font-size: 11px; color: #718096; }
+.sidebar-nav { gap: 4px; margin: 0; }
+.nav-link, .nav-link-top, .nav-link-sub {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 650;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+.nav-link-top { min-height: 38px; color: #1e293b; font-weight: 720; }
+.nav-link-sub { min-height: 32px; padding-left: 28px; font-size: 12px; }
+.nav-link.active, .nav-link:hover, .nav-link-top:hover {
+  background: var(--primary-soft);
+  border-color: #c8e5f7;
+  color: var(--primary-strong);
+}
+.nav-accordion { border: 0; border-radius: 0; background: transparent; box-shadow: none; overflow: visible; }
+.nav-accordion[open] { background: transparent; box-shadow: none; }
+.nav-accordion-summary { min-height: 38px; padding: 0 10px; border: 1px solid transparent; border-radius: var(--radius-sm); }
+.nav-accordion-summary:hover { background: #f5f8fb; border-color: #e5ebf1; }
+.nav-accordion-summary::after { width: 18px; height: 18px; border-radius: 4px; background: transparent; color: #64748b; font-size: 16px; font-weight: 500; }
+.nav-group-title { color: #1e293b; font-size: 13px; font-weight: 720; letter-spacing: 0; }
+.nav-submenu { gap: 2px; padding: 2px 0 4px; }
+.sidebar-status {
+  gap: 10px;
+  margin: auto 0 0;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.sidebar-status-heading { display: flex; align-items: center; justify-content: space-between; color: #475569; font-size: 11px; font-weight: 760; letter-spacing: .06em; text-transform: uppercase; }
+.sidebar-local-badge { padding: 2px 5px; border: 1px solid #cfe5dc; border-radius: 4px; background: #f3fbf7; color: var(--success); font-size: 10px; letter-spacing: 0; }
+.status-block { gap: 4px; padding-bottom: 9px; border-bottom-color: #e3eaf1; }
+.status-caption { color: #718096; font-size: 10px; font-weight: 760; letter-spacing: .06em; }
+.status-block strong { color: #1e293b; font-size: 12px; }
+.status-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.status-line strong { font-size: 12px; }
+.pill { padding: 2px 7px; border: 1px solid #cfe5dc; border-radius: 999px; background: #f3fbf7; color: var(--success); font-size: 11px; font-weight: 720; }
+.pill.running { border-color: #f4d698; background: #fff9e8; color: #9a6700; }
+.pill.failed { border-color: #f0c4bf; background: #fff5f4; color: var(--danger); }
+.service-tip { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #718096; font-size: 11px; }
+.service-tip code { padding: 2px 4px; border: 1px solid #e3eaf1; border-radius: 4px; background: #fff; color: #475569; font-size: 10px; }
+.sidebar-actions-panel { margin-top: 8px; }
+.feedback-entry-button { min-height: 34px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; color: #475569; font-size: 12px; font-weight: 680; box-shadow: none; }
+.feedback-entry-button:hover { border-color: #9dcde9; background: var(--primary-soft); color: var(--primary-strong); box-shadow: none; }
+.content { max-width: 1480px; padding: 32px 40px 56px; }
+.hero { display: block; margin: 0 0 24px; padding: 0 0 20px; border-bottom: 1px solid var(--line); }
+.hero-context { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: #718096; font-size: 11px; font-weight: 650; letter-spacing: .025em; }
+.eyebrow { margin: 0; color: var(--primary-strong); font-size: 11px; font-weight: 760; letter-spacing: .08em; }
+.hero-context-divider { width: 3px; height: 3px; border-radius: 50%; background: #94a3b8; }
+.hero h1 { max-width: none; font-size: clamp(26px, 2.4vw, 34px); letter-spacing: -.035em; }
+.lede { margin: 7px 0 0; max-width: 760px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.inline-notice { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; padding: 10px 12px; border: 1px solid #cfe2f0; border-radius: var(--radius-md); background: #f4f9fd; color: #526174; font-size: 12px; line-height: 1.55; }
+.inline-notice strong { color: #24435a; font-weight: 750; }
+.inline-notice-icon { display: grid; flex: 0 0 auto; width: 18px; height: 18px; place-items: center; color: var(--primary); }
+.inline-notice-icon svg { width: 16px; height: 16px; }
+.tool-guide-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+.tool-guide-card {
+  display: grid;
+  min-height: 198px;
+  align-content: space-between;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: none;
+  color: var(--ink);
+  text-align: left;
+  transition: border-color .16s ease, background .16s ease;
+}
+.tool-guide-card:nth-child(1), .tool-guide-card:nth-child(2) { grid-column: span 3; }
+.tool-guide-card:nth-child(3) { grid-column: span 4; }
+.tool-guide-card:nth-child(4) { grid-column: span 2; }
+.tool-guide-card:hover, .tool-guide-card:focus-visible { border-color: #8ec7e8; background: #fbfdff; color: var(--ink); }
+.tool-guide-card-top, .tool-guide-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tool-guide-icon { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid #cfe2f0; border-radius: var(--radius-sm); background: #f4f9fd; color: var(--primary-strong); }
+.tool-guide-icon svg { width: 19px; height: 19px; }
+.tool-guide-badge { padding: 3px 6px; border: 1px solid #e1e8ef; border-radius: 4px; color: #64748b; font-size: 10px; font-weight: 720; letter-spacing: .04em; text-transform: uppercase; }
+.tool-guide-badge-ai { border-color: #d7d8f6; background: #f7f7ff; color: #5854a8; }
+.tool-guide-card-copy { display: grid; gap: 5px; }
+.tool-guide-card-copy strong { color: #172033; font-size: 17px; font-weight: 760; letter-spacing: -.02em; }
+.tool-guide-card-copy small { max-width: 420px; color: #64748b; font-size: 12px; font-weight: 500; line-height: 1.55; }
+.tool-guide-card-footer { padding-top: 10px; border-top: 1px solid #edf1f5; color: #718096; font-size: 11px; font-weight: 650; }
+.tool-guide-arrow { color: var(--primary); font-size: 16px; line-height: 1; }
+.tool-guide-card-review { border-color: #c9daed; background: #fbfdff; }
+.tool-guide-card-review .tool-guide-icon { border-color: #d7d8f6; background: #f7f7ff; color: #5854a8; }
+.card, .advanced-card, .hero-card { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); box-shadow: none; }
+.card { padding: 20px; margin-bottom: 16px; }
+.advanced-card { margin-bottom: 16px; }
+.advanced-card summary { padding: 16px 20px; }
+.advanced-card summary::after { min-height: 28px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: #f8fafc; color: #475569; font-size: 11px; }
+.stage-panel, .review-followup-context, .review-followup-messages { border-radius: var(--radius-md); background: #f8fafc; }
+.section-header { margin-bottom: 14px; }
+.section-header h2 { font-size: 22px; letter-spacing: -.025em; }
+.card-title { margin-bottom: 16px; }
+.card-title h2 { font-size: 20px; }
+.card-title h3 { font-size: 17px; }
+.card-title p, .section-header p { font-size: 13px; line-height: 1.55; }
+.grid.two, .stage-grid { gap: 12px; }
+label { gap: 6px; color: #526174; font-size: 12px; font-weight: 680; }
+input, select, textarea { border-color: var(--line-strong); border-radius: var(--radius-sm); box-shadow: none; }
+input, select { min-height: 38px; padding: 8px 10px; }
+textarea { padding: 9px 10px; }
+input:hover, select:hover, textarea:hover { border-color: #9bb9d0; }
+.actions { gap: 8px; margin-top: 14px; }
+button { min-height: 36px; border-radius: var(--radius-sm); padding: 0 12px; font-size: 13px; font-weight: 680; box-shadow: none; transition: border-color .16s ease, background .16s ease, color .16s ease; }
+button.primary { border: 1px solid #075985; background: var(--primary); color: #fff; box-shadow: none; }
+button.primary:hover:not(:disabled) { border-color: #075985; background: #075985; box-shadow: none; }
+button.secondary, .mini-button { border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: #fff; color: #334155; }
+button.secondary:hover:not(:disabled), .mini-button:hover:not(:disabled) { border-color: #9dcde9; background: var(--primary-soft); color: var(--primary-strong); }
+button.danger { border-color: #f0c4bf; border-radius: var(--radius-sm); background: #fff5f4; }
+.check-line { min-height: 32px; padding: 6px 9px; border-radius: var(--radius-sm); background: #fff; }
+.subnav { gap: 6px; margin-bottom: 14px; }
+.subnav-link { min-height: 32px; border-radius: var(--radius-sm); background: #fff; font-size: 12px; }
+.subnav-link.active { border-color: #b9dbee; background: var(--primary-soft); box-shadow: none; }
+.sticky-actions { padding: 10px 12px; border-radius: var(--radius-md); background: rgba(255,255,255,.96); box-shadow: none; }
+.pattern-table-wrap, .result-box, .review-result-table-wrap, .review-input-table-wrap { border-radius: var(--radius-md); }
+.pattern-table th, .pattern-table td { padding: 9px 10px; }
+.pattern-table th { background: #f8fafc; color: #526174; font-size: 11px; }
+dialog.modal::backdrop { background: rgba(15, 23, 42, .38); backdrop-filter: none; }
+.modal-card, .tool-guide-dialog .dialog-card { border-radius: var(--radius-lg); box-shadow: 0 16px 40px rgba(15, 23, 42, .16); }
+.tool-guide-dialog .dialog-card { padding: 20px; }
+.tool-guide-dialog .dialog-header h3 { font-size: 24px; }
+.review-language-popover { border-radius: var(--radius-md); box-shadow: 0 16px 36px rgba(15, 23, 42, .14); }
+@media (max-width: 980px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { position: static; max-height: none; min-height: 0; padding: 14px; }
+  .brand { margin-bottom: 14px; }
+  .sidebar-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+  .nav-accordion { grid-column: span 2; }
+  .sidebar-status { margin-top: 14px; }
+  .content { padding: 24px 20px 40px; }
+  .tool-guide-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tool-guide-card:nth-child(n) { grid-column: span 1; min-height: 176px; }
+}
+@media (max-width: 560px) {
+  .content { padding: 20px 14px 32px; }
+  .hero { margin-bottom: 18px; padding-bottom: 16px; }
+  .hero h1 { font-size: 25px; }
+  .sidebar-nav { grid-template-columns: 1fr; }
+  .nav-accordion { grid-column: span 1; }
+  .tool-guide-grid { grid-template-columns: 1fr; }
+  .tool-guide-card:nth-child(n) { min-height: 152px; }
+  .inline-notice { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
 """
 
@@ -7342,7 +7581,9 @@ function renderReviewMessages(messages, questions) {
       container.scrollTop = container.scrollHeight;
     });
   }
-  const latestRunId = String(reviewConversationState.snapshot?.workspace_runs?.[0]?.id || "");
+  const latestRun = reviewConversationState.snapshot?.workspace_runs?.[0] || null;
+  const latestRunId = String(latestRun?.id || "");
+  const hasExecutablePlan = Boolean((latestRun?.plan?.targets || []).some((target) => Array.isArray(target?.units) && target.units.length));
   questions.filter((question) => question.status === "pending" && (!latestRunId || question.run_id === latestRunId)).forEach((question) => {
     const item = document.createElement("div");
     item.className = "review-chat-message assistant";
@@ -7350,15 +7591,20 @@ function renderReviewMessages(messages, questions) {
     prompt.textContent = question.prompt || "请确认识别结果";
     const actions = document.createElement("div");
     actions.className = "review-decision-actions";
-    const confirmRow = document.createElement("div");
-    confirmRow.className = "review-decision-confirm-row";
-    const confirmButton = document.createElement("button");
-    confirmButton.type = "button";
-    confirmButton.className = "primary";
-    confirmButton.textContent = question.recommended_label || "确认";
-    confirmButton.addEventListener("click", () => submitReviewDecision(question, "confirm", question.recommended_value || "确认").catch(showReviewConversationError));
+    const canConfirm = hasExecutablePlan && Boolean(String(question.recommended_label || "").trim()) && Boolean(String(question.recommended_value || "").trim());
+    if (canConfirm) {
+      const confirmRow = document.createElement("div");
+      confirmRow.className = "review-decision-confirm-row";
+      const confirmButton = document.createElement("button");
+      confirmButton.type = "button";
+      confirmButton.className = "primary";
+      confirmButton.textContent = question.recommended_label;
+      confirmButton.addEventListener("click", () => submitReviewDecision(question, "confirm", question.recommended_value).catch(showReviewConversationError));
+      confirmRow.appendChild(confirmButton);
+      actions.appendChild(confirmRow);
+    }
     const otherInput = document.createElement("input");
-    otherInput.placeholder = "其他：自行输入";
+    otherInput.placeholder = canConfirm ? "其他：自行输入" : "请补充目标语种、译文内容或文件位置";
     const otherButton = document.createElement("button");
     otherButton.type = "button";
     otherButton.className = "secondary";
@@ -7366,9 +7612,8 @@ function renderReviewMessages(messages, questions) {
     otherButton.addEventListener("click", () => submitReviewDecision(question, "other", otherInput.value).catch(showReviewConversationError));
     const otherRow = document.createElement("div");
     otherRow.className = "review-decision-other-row";
-    confirmRow.appendChild(confirmButton);
     otherRow.append(otherInput, otherButton);
-    actions.append(confirmRow, otherRow);
+    actions.appendChild(otherRow);
     item.append(prompt, actions);
     container.appendChild(item);
   });

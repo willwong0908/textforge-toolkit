@@ -974,7 +974,13 @@ def _build_user_prompt(config: dict[str, Any], text: str, has_info: bool) -> str
     prefixes = []
     source_language = str(config.get("source_language") or "").strip()
     target_language = str(config.get("target_language") or "").strip()
-    if source_language or target_language:
+    if source_language.lower() in {"none", "auto"}:
+        source_language = ""
+    if target_language.lower() == "auto":
+        target_language = ""
+    if not source_language and target_language:
+        prefixes.append(f"以下是{target_language}译文；本次没有原文，请仅检查译文本身的语言、格式、术语和表达问题。")
+    elif source_language or target_language:
         prefixes.append(f"以下是 {source_language or '未指定语种'} 原文和 {target_language or '未指定语种'} 译文。")
     if has_info:
         prefixes.append(

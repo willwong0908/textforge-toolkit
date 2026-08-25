@@ -250,16 +250,20 @@ def submit_decision(session_id: str, payload: WorkspaceDecisionPayload) -> dict[
     if not get_session(session_id):
         raise HTTPException(status_code=404, detail="审校会话不存在")
     try:
-        if payload.question_id:
-            answer_question(payload.question_id, payload.answer or payload.action)
-        if payload.action == "confirm":
-            tasks = start_session_review(session_id, payload.run_id)
-            return {"ok": True, "tasks": tasks}
         snapshot = get_session_snapshot(session_id) or {}
         source_run = next(
             (item for item in snapshot.get("workspace_runs", []) if item.get("id") == payload.run_id),
             None,
         )
+        if payload.action == "confirm":
+            targets = list((source_run or {}).get("plan", {}).get("targets", []) or [])
+            if not any(item.get("units") for item in targets):
+                raise ValueError("当前没有可确认的审校方案，请补充目标语种和译文内容后重新识别")
+        if payload.question_id:
+            answer_question(payload.question_id, payload.answer or payload.action)
+        if payload.action == "confirm":
+            tasks = start_session_review(session_id, payload.run_id)
+            return {"ok": True, "tasks": tasks}
         run_id = submit_workspace_inspection(
             session_id,
             "",

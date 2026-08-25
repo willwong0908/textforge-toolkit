@@ -7,6 +7,7 @@ from term_extractor_app.ai_review import workflow_service
 from term_extractor_app.ai_review.review_service import (
     ReviewTaskError,
     _build_packages,
+    _build_user_prompt,
     _validate_response_items,
 )
 from term_extractor_app.ai_review.output_service import NORMAL_HEADERS
@@ -37,6 +38,15 @@ class ReviewWorkflowValidationTests(unittest.TestCase):
 
         character_packages = _build_packages(items[:3], 15, max_items=80)
         self.assertEqual([len(package) for package in character_packages], [1, 1, 1])
+
+    def test_no_source_review_prompt_does_not_invent_an_original_text(self) -> None:
+        prompt = _build_user_prompt(
+            {"source_language": "none", "target_language": "中文", "user_prompt": "审校：{text}"},
+            "{}",
+            False,
+        )
+        self.assertIn("没有原文", prompt)
+        self.assertNotIn("none 原文", prompt)
 
     def test_validation_rejects_missing_item(self) -> None:
         package = [_request_item("a"), _request_item("b")]
