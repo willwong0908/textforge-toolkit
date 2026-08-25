@@ -219,6 +219,53 @@ class WorkspaceSessionTests(unittest.TestCase):
         self.assertEqual(plan["targets"][0]["units"][0]["target_language"], "中文")
         self.assertEqual(plan["targets"][0]["units"][0]["source_text"], "")
 
+    def test_explicit_no_source_docx_expands_document_pointer_to_all_paragraphs(self) -> None:
+        docx_path = Path(self.temp.name) / "translation.docx"
+        with zipfile.ZipFile(docx_path, "w") as archive:
+            archive.writestr(
+                "word/document.xml",
+                """<w:document xmlns:w=\"urn:test\"><w:body>
+                <w:p><w:r><w:t>第一段中文译文。</w:t></w:r></w:p>
+                <w:p><w:r><w:t>第二段中文译文。</w:t></w:r></w:p>
+                </w:body></w:document>""",
+            )
+        session = session_store.create_session(source_language="auto", target_languages=["auto"])
+        attachment = session_store.add_attachment(session["id"], "translation.docx", docx_path.read_bytes())
+
+        def document_plan(messages: list[dict[str, str]], on_delta=None) -> str:
+            response = json.dumps(
+                {
+                    "content_files": [attachment["id"]], "reference_files": [], "source_language": "auto",
+                    "targets": [{"language": "auto", "mappings": [{
+                        "attachment_id": attachment["id"], "scope": "document",
+                        "source_pointer": None, "target_pointer": "word/document.xml",
+                    }]}],
+                    "relationships": [], "assumptions": [], "warnings": [], "confidence": 0.8,
+                    "needs_input": False, "question": "",
+                },
+                ensure_ascii=False,
+            )
+            if on_delta:
+                on_delta(response)
+            return response
+
+        with patch(
+            "term_extractor_app.ai_review.workspace_service.get_shared_ai_settings",
+            return_value={"selected_model": "configured-model", "api_key": "test-key"},
+        ), patch(
+            "term_extractor_app.ai_review.workspace_service.workspace_chat",
+            side_effect=document_plan,
+        ):
+            plan = inspect_workspace_sync(
+                session["id"], adjustment_text="没有原文，全文都是中文译文，直接审校译文。"
+            )
+        self.assertFalse(plan["needs_input"])
+        self.assertEqual(plan["source_language"], "none")
+        self.assertEqual([item["language"] for item in plan["targets"]], ["中文"])
+        units = plan["targets"][0]["units"]
+        self.assertEqual([item["target_text"] for item in units], ["第一段中文译文。", "第二段中文译文。"])
+        self.assertTrue(all(not item["source_text"] for item in units))
+
     def test_xliff_is_the_only_local_only_fast_path(self) -> None:
         session = session_store.create_session(target_languages=["简体中文"])
         xliff = b'''<?xml version="1.0" encoding="UTF-8"?>
