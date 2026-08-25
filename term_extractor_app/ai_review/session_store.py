@@ -166,8 +166,6 @@ def add_attachment(
     session_id: str,
     filename: str,
     data: bytes,
-    *,
-    original_path: str | None = None,
 ) -> dict[str, Any]:
     session = get_session(session_id)
     if not session:
@@ -182,16 +180,15 @@ def add_attachment(
         conn.execute(
             """
             INSERT INTO review_attachments (
-                id, session_id, original_filename, stored_path, original_path, file_hash,
+                id, session_id, original_filename, stored_path, file_hash,
                 size_bytes, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
             """,
             (
                 attachment_id,
                 session_id,
                 filename,
                 str(stored_path),
-                str(Path(original_path).resolve()) if original_path else None,
                 digest,
                 len(data),
                 now,
@@ -223,7 +220,7 @@ def get_attachment(attachment_id: str) -> dict[str, Any] | None:
 def update_attachment(attachment_id: str, **fields: Any) -> dict[str, Any]:
     allowed = {
         "file_type", "status", "manifest_json", "mapping_mode", "mapping_preset_id",
-        "sent_at", "error_message", "original_path",
+        "sent_at", "error_message",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
     if "manifest_json" in values and not isinstance(values["manifest_json"], str):
@@ -489,7 +486,6 @@ def _attachment_to_dict(row: Any) -> dict[str, Any]:
         "session_id": row["session_id"],
         "original_filename": row["original_filename"],
         "stored_path": row["stored_path"],
-        "original_path": row["original_path"] if "original_path" in row.keys() else None,
         "file_type": row["file_type"],
         "file_hash": row["file_hash"],
         "size_bytes": row["size_bytes"],

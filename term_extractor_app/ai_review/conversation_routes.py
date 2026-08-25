@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -32,7 +31,6 @@ from .readers import ReaderError, build_default_registry
 from .workflow_service import get_session_task_results, start_session_review
 from .workspace_service import submit_workspace_inspection
 from ..telemetry import track_event
-from ..open_utils import open_path
 
 
 router = APIRouter(prefix="/api/ai-review/conversations", tags=["ai-review-conversations"])
@@ -150,33 +148,12 @@ def attach_local_file(session_id: str, payload: LocalAttachmentPayload) -> dict[
             session_id,
             path.name,
             path.read_bytes(),
-            original_path=str(path),
         )
     except OSError as exc:
         raise HTTPException(status_code=400, detail=f"读取原始文件失败：{exc}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"attachment": attachment}
-
-
-@router.post("/{session_id}/attachments/{attachment_id}/relink-original")
-def relink_attachment_original(
-    session_id: str, attachment_id: str, payload: LocalAttachmentPayload
-) -> dict[str, Any]:
-    attachment = get_attachment(attachment_id)
-    if not attachment or attachment["session_id"] != session_id:
-        raise HTTPException(status_code=404, detail="附件不存在")
-    path = Path(str(payload.file_path or "").strip())
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=404, detail="找不到所选原始文件。")
-    try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"读取原始文件失败：{exc}") from exc
-    if digest != str(attachment.get("file_hash") or ""):
-        raise HTTPException(status_code=400, detail="所选文件与会话附件不一致，不能关联。")
-    updated = update_attachment(attachment_id, original_path=str(path.resolve()))
-    return {"ok": True, "attachment": updated}
 
 
 @router.patch("/{session_id}/attachments/{attachment_id}")
@@ -242,24 +219,6 @@ def remove_pending_attachment(session_id: str, attachment_id: str) -> dict[str, 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
-
-
-@router.post("/{session_id}/attachments/{attachment_id}/open-original")
-def open_conversation_attachment_original(session_id: str, attachment_id: str) -> dict[str, Any]:
-    attachment = get_attachment(attachment_id)
-    if not attachment or attachment["session_id"] != session_id:
-        raise HTTPException(status_code=404, detail="附件不存在")
-    original_path_text = str(attachment.get("original_path") or "").strip()
-    if not original_path_text:
-        raise HTTPException(status_code=404, detail="未记录原始文件路径，无法溯源打开。")
-    original_path = Path(original_path_text)
-    if not original_path.exists() or not original_path.is_file():
-        raise HTTPException(status_code=404, detail=f"找不到原始文件：{original_path}")
-    try:
-        open_path(original_path)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"打开原始文件失败：{exc}") from exc
-    return {"ok": True, "file_path": str(original_path)}
 
 
 @router.post("/{session_id}/messages")

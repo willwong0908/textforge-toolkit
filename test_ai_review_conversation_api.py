@@ -115,12 +115,6 @@ class ConversationApiTests(unittest.TestCase):
         self.assertIsNotNone(snapshot["attachments"][0]["sent_at"])
         attachment_message = next(item for item in snapshot["messages"] if item["kind"] == "attachment_message")
         self.assertEqual(attachment_message["payload"]["attachments"][0]["id"], uploaded_id)
-        opened = self.client.post(
-            f"/api/ai-review/conversations/{session_id}/attachments/{uploaded_id}/open-original",
-            json={},
-        )
-        self.assertEqual(opened.status_code, 404)
-        self.assertIn("未记录原始文件路径", opened.json()["detail"])
         event_types = {item["event_type"] for item in session_store.get_events(session_id)}
         self.assertIn("workspace.output_started", event_types)
         self.assertIn("workspace.delta", event_types)
@@ -166,38 +160,18 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual(delete.status_code, 200)
         self.assertEqual(self.client.get(f"/api/ai-review/conversations/{session_id}").status_code, 404)
 
-    def test_local_attachment_opens_original_file_and_reports_when_missing(self) -> None:
-        original_path = Path(self.temp.name) / "original.csv"
-        original_path.write_text("Source,Target\nHello,你好\n", encoding="utf-8")
+    def test_local_attachment_keeps_a_private_review_copy_without_source_path(self) -> None:
+        selected_path = Path(self.temp.name) / "selected.csv"
+        selected_path.write_text("Source,Target\nHello,你好\n", encoding="utf-8")
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
         attached = self.client.post(
             f"/api/ai-review/conversations/{session_id}/attachments/local",
-            json={"file_path": str(original_path)},
+            json={"file_path": str(selected_path)},
         )
         self.assertEqual(attached.status_code, 200)
-        attachment_id = attached.json()["attachment"]["id"]
-        with patch("term_extractor_app.ai_review.conversation_routes.open_path") as open_path:
-            opened = self.client.post(
-                f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/open-original",
-                json={},
-            )
-        self.assertEqual(opened.status_code, 200)
-        open_path.assert_called_once_with(original_path.resolve())
-        original_path.unlink()
-        missing = self.client.post(
-            f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/open-original",
-            json={},
-        )
-        self.assertEqual(missing.status_code, 404)
-        self.assertIn("找不到原始文件", missing.json()["detail"])
-        relinked_path = Path(self.temp.name) / "moved-original.csv"
-        relinked_path.write_text("Source,Target\nHello,你好\n", encoding="utf-8")
-        relinked = self.client.post(
-            f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/relink-original",
-            json={"file_path": str(relinked_path)},
-        )
-        self.assertEqual(relinked.status_code, 200)
-        self.assertEqual(relinked.json()["attachment"]["original_path"], str(relinked_path.resolve()))
+        attachment = attached.json()["attachment"]
+        self.assertNotIn("original_path", attachment)
+        self.assertTrue(Path(attachment["stored_path"]).is_file())
 
     def test_delete_requires_confirmation(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]

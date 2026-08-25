@@ -4993,8 +4993,7 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-attachment-remove { width: 26px; height: 26px; padding: 0; margin-right: 3px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); }
 .review-attachment-remove:hover { color: var(--danger); background: rgba(190, 44, 44, 0.09); }
 .review-message-files { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
-.review-message-file { display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid rgba(48, 111, 214, 0.2); border-radius: 10px; background: rgba(255,255,255,0.75); color: #245aa5; text-decoration: none; }
-.review-message-file:hover { border-color: rgba(48, 111, 214, 0.45); background: white; }
+.review-message-file { display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid rgba(48, 111, 214, 0.2); border-radius: 10px; background: rgba(255,255,255,0.75); color: #245aa5; cursor: default; }
 .review-stream-output { max-height: 190px; margin-top: 8px; padding: 10px 12px; overflow: auto; border-radius: 10px; background: #f4f7fa; color: #536174; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .review-thinking-details { margin-top: 10px; border: 1px solid #dfe6ec; border-radius: 11px; background: #f7f9fb; overflow: hidden; }
 .review-thinking-details summary { padding: 9px 11px; color: #526175; font-size: 12px; font-weight: 750; cursor: pointer; user-select: none; }
@@ -5619,7 +5618,6 @@ dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdr
 .composer-chip:hover, .review-target-tab:hover { border-color: rgba(161,193,250,.62); background: rgba(75,103,160,.20); color: #fff; }
 .review-attachment-chip { background: rgba(88,215,194,.10); color: #a5e9dc; }
 .review-message-file { border-color: rgba(130,165,236,.34); border-radius: 5px; background: rgba(93,141,255,.10); color: #bad0ff; }
-.review-message-file:hover { border-color: rgba(167,196,255,.66); background: rgba(93,141,255,.18); }
 .review-stream-output, .review-thinking-details { border-color: rgba(100,132,183,.32); border-radius: 5px; background: rgba(3,10,21,.44); color: #b8c8df; }
 .review-thinking-details summary { color: #aebfd7; }
 .review-thinking-details[open] summary { border-bottom-color: rgba(100,132,183,.26); }
@@ -8537,21 +8535,10 @@ function renderReviewMessages(messages, questions) {
       const files = document.createElement("div");
       files.className = "review-message-files";
       attachments.forEach((attachment) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "review-message-file";
-        const canOpenOriginal = Boolean(attachment.original_path);
-        button.title = canOpenOriginal ? "打开原始文件" : "关联原始文件后可直接打开";
-        button.textContent = canOpenOriginal
-          ? `▤ ${attachment.original_filename || "文件"}`
-          : `▤ ${attachment.original_filename || "文件"} · 关联原文件`;
-        button.classList.toggle("needs-relink", !canOpenOriginal);
-        button.addEventListener("click", () => (
-          canOpenOriginal
-            ? openReviewConversationAttachmentOriginal(attachment.id)
-            : relinkReviewConversationAttachmentOriginal(attachment.id)
-        ).catch(showReviewConversationError));
-        files.appendChild(button);
+        const file = document.createElement("span");
+        file.className = "review-message-file";
+        file.textContent = `▤ ${attachment.original_filename || "文件"}`;
+        files.appendChild(file);
       });
       item.appendChild(files);
     }
@@ -8793,28 +8780,6 @@ async function chooseReviewConversationFiles() {
     });
   }
   $("reviewConversationHint").textContent = "文件已添加，可在对话中溯源打开原文件";
-  await refreshCurrentReviewConversation();
-}
-
-async function openReviewConversationAttachmentOriginal(attachmentId) {
-  if (!reviewConversationState.currentId || !attachmentId) throw new Error("附件不存在");
-  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachmentId)}/open-original`, {
-    method: "POST",
-    body: "{}",
-  });
-  $("reviewConversationHint").textContent = "已打开原始文件";
-}
-
-async function relinkReviewConversationAttachmentOriginal(attachmentId) {
-  const data = await api("/api/dialog/select-review-files");
-  const paths = Array.isArray(data.file_paths) ? data.file_paths.filter(Boolean) : [];
-  if (!paths.length) return;
-  if (paths.length > 1) throw new Error("一次只能选择一个与该附件内容完全一致的原始文件");
-  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments/${encodeURIComponent(attachmentId)}/relink-original`, {
-    method: "POST",
-    body: JSON.stringify({ file_path: paths[0] }),
-  });
-  await openReviewConversationAttachmentOriginal(attachmentId);
   await refreshCurrentReviewConversation();
 }
 
