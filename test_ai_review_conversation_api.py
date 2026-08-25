@@ -37,7 +37,8 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
         "warnings": [], "confidence": 0.97, "needs_input": False, "question": "",
     }, ensure_ascii=False)
     if on_delta:
-        on_delta(response)
+        on_delta("正在判断文件与列之间的关系。", "reasoning")
+        on_delta(response, "content")
     return response
 
 
@@ -123,6 +124,9 @@ class ConversationApiTests(unittest.TestCase):
         event_types = {item["event_type"] for item in session_store.get_events(session_id)}
         self.assertIn("workspace.output_started", event_types)
         self.assertIn("workspace.delta", event_types)
+        workspace_message = next(item for item in snapshot["messages"] if item["kind"] == "workspace_report")
+        self.assertEqual(workspace_message["payload"]["_thinking_text"], "正在判断文件与列之间的关系。")
+        self.assertNotIn("_thinking_text", snapshot["workspace_runs"][0]["plan"])
         plan = snapshot["workspace_runs"][0]["plan"]
         self.assertEqual({item["language"] for item in plan["targets"]}, {"简体中文", "日语"})
         self.assertEqual(len(snapshot["questions"]), 1)
@@ -146,6 +150,10 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual([item["language"] for item in adjusted_plan["targets"]], ["简体中文"])
         self.assertEqual(adjusted_plan["targets"][0]["units"][0]["target_text"], "你好")
         self.assertEqual(adjusted_plan["targets"][0]["units"][0]["source_text"], "")
+        pending_questions = [item for item in snapshot["questions"] if item["status"] == "pending"]
+        superseded_questions = [item for item in snapshot["questions"] if item["status"] == "superseded"]
+        self.assertEqual(len(pending_questions), 1)
+        self.assertEqual(len(superseded_questions), 0)
         delete = self.client.request(
             "DELETE",
             f"/api/ai-review/conversations/{session_id}",
@@ -162,6 +170,24 @@ class ConversationApiTests(unittest.TestCase):
             json={"confirm": False},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_starting_new_workspace_run_supersedes_old_pending_question(self) -> None:
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        first_run = session_store.create_workspace_run(
+            session_id, model="configured-model", input_signature="first"
+        )
+        first_question = session_store.create_question(
+            session_id, first_run["id"], "第一次确认", "确认推荐方案"
+        )
+        second_run = session_store.create_workspace_run(
+            session_id, model="configured-model", input_signature="second"
+        )
+        session_store.create_question(session_id, second_run["id"], "第二次确认", "确认推荐方案")
+
+        questions = self.client.get(f"/api/ai-review/conversations/{session_id}").json()["questions"]
+        first = next(item for item in questions if item["id"] == first_question["id"])
+        self.assertEqual(first["status"], "superseded")
+        self.assertEqual(len([item for item in questions if item["status"] == "pending"]), 1)
 
     def test_pending_attachment_can_be_removed_and_source_can_be_none(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]

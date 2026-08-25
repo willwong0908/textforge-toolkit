@@ -373,6 +373,8 @@ class OpenAICompatibleAdapter:
             payload["enable_thinking"] = bool(metadata.get("enable_thinking"))
         if "thinking" in metadata:
             payload["thinking"] = metadata.get("thinking")
+        if "reasoning_effort" in metadata:
+            payload["reasoning_effort"] = str(metadata.get("reasoning_effort") or "low")
         if use_json_response_format and self._is_json_batch_task(request):
             payload["response_format"] = self._json_response_format()
         return await client.post(self._chat_url(), headers=self._headers(), json=payload)

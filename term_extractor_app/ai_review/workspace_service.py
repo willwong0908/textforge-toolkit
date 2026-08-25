@@ -245,7 +245,7 @@ def _inspect(
     elif cached_plan is not None:
         plan = cached_plan
     else:
-        refined = _refine_with_model(
+        refined, thinking_text = _refine_with_model(
             session,
             documents,
             direct_text=direct_text,
@@ -274,7 +274,11 @@ def _inspect(
     state = "needs_input" if plan.needs_input else "ready"
     update_workspace_run(run_id, status=state, plan=plan_data)
     update_session(session_id, status=state)
-    add_message(session_id, "assistant", "workspace_report", _format_report(plan_data), plan_data)
+    message_payload = dict(plan_data)
+    if "thinking_text" in locals() and thinking_text.strip():
+        message_payload["_thinking_text"] = thinking_text[-30000:]
+    message_payload["_workspace_run_id"] = run_id
+    add_message(session_id, "assistant", "workspace_report", _format_report(plan_data), message_payload)
     emit_event(session_id, f"workspace.{state}", {"run_id": run_id, "plan": plan_data})
     if plan.needs_input:
         create_question(session_id, run_id, plan.question or "无法确定待审校内容，请补充说明。", "采用推荐识别结果")
@@ -691,10 +695,10 @@ def _refine_with_model(
     adjustment_text: str = "",
     run_id: str = "",
     parent_run_id: str = "",
-) -> ExtractionPlan | None:
+) -> tuple[ExtractionPlan | None, str]:
     settings = get_shared_ai_settings()
     if not str(settings.get("api_key") or "").strip() or not str(settings.get("selected_model") or "").strip():
-        return None
+        return None, ""
     analysis_documents = dict(documents)
     if direct_text.strip():
         direct_blocks = [
@@ -725,38 +729,51 @@ def _refine_with_model(
     )
     try:
         pending_chunks: list[str] = []
+        thinking_chunks: list[str] = []
+        pending_phase = "content"
         received_chars = 0
         last_emit = time.monotonic()
         emitted_any = False
 
-        def emit_delta(delta: str) -> None:
-            nonlocal received_chars, last_emit, emitted_any
+        def flush_pending() -> None:
+            nonlocal last_emit, emitted_any
+            if not pending_chunks:
+                return
+            emit_event(
+                session["id"],
+                "workspace.delta",
+                {
+                    "run_id": run_id,
+                    "delta": "".join(pending_chunks),
+                    "phase": pending_phase,
+                    "received_chars": received_chars,
+                },
+            )
+            pending_chunks.clear()
+            last_emit = time.monotonic()
+            emitted_any = True
+
+        def emit_delta(delta: str, phase: str = "content") -> None:
+            nonlocal received_chars, pending_phase
             value = str(delta or "")
+            if phase == "reasoning" and value:
+                thinking_chunks.append(value)
+            if pending_chunks and phase != pending_phase:
+                flush_pending()
+            pending_phase = phase
             if value:
                 pending_chunks.append(value)
                 received_chars += len(value)
             now = time.monotonic()
             if pending_chunks and (not emitted_any or sum(map(len, pending_chunks)) >= 64 or now - last_emit >= 0.12):
-                emit_event(
-                    session["id"],
-                    "workspace.delta",
-                    {"run_id": run_id, "delta": "".join(pending_chunks), "received_chars": received_chars},
-                )
-                pending_chunks.clear()
-                last_emit = now
-                emitted_any = True
+                flush_pending()
 
         emit_event(session["id"], "workspace.output_started", {"run_id": run_id})
         raw = workspace_chat(
             [{"role": "system", "content": WORKSPACE_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
             on_delta=emit_delta,
         )
-        if pending_chunks:
-            emit_event(
-                session["id"],
-                "workspace.delta",
-                {"run_id": run_id, "delta": "".join(pending_chunks), "received_chars": received_chars},
-            )
+        flush_pending()
         parsed = _parse_json(raw)
         plan = _plan_from_agent(session["id"], parsed, analysis_documents)
         if str(session.get("source_language") or "").lower() == "none":
@@ -766,9 +783,9 @@ def _refine_with_model(
                     unit.source_text = ""
                     unit.metadata["source_pointer"] = ""
                     unit.metadata["source_column_index"] = None
-        return plan
+        return plan, "".join(thinking_chunks)
     except (SharedProviderError, ValueError, json.JSONDecodeError):
-        return None
+        return None, "".join(thinking_chunks) if 'thinking_chunks' in locals() else ""
 
 
 def _workspace_adjustment_context(session_id: str, parent_run_id: str) -> dict[str, Any]:

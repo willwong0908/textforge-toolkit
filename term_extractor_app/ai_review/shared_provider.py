@@ -31,16 +31,23 @@ def get_shared_ai_settings() -> dict[str, Any]:
     provider_name, provider = _load_provider_settings()
     settings = SettingsStore(get_app_paths()).load()
     ai_review_stage = dict(settings.input_defaults.get("ai_review_stage_settings", {}) or {})
+    configured_limit = int(ai_review_stage.get("batch_request_char_limit") or 0)
+    if configured_limit <= 6000:
+        configured_limit = 20000
+    reasoning_effort = str(ai_review_stage.get("reasoning_effort") or "low").strip().lower()
+    if reasoning_effort not in {"low", "high", "max"}:
+        reasoning_effort = "low"
     return {
         "provider": provider_name,
         "api_key": provider.api_key,
         "selected_model": provider.model,
         "models": [],
         "max_concurrency": int(provider.max_concurrency or 6),
-        "max_chars_per_request": int(ai_review_stage.get("batch_request_char_limit") or 3000),
-        "enable_thinking": bool(ai_review_stage.get("enable_thinking", False)),
+        "max_chars_per_request": configured_limit,
+        "enable_thinking": True,
         "max_items_per_request": int(ai_review_stage.get("max_items_per_request") or 80),
-        "workspace_enable_thinking": bool(ai_review_stage.get("workspace_enable_thinking", False)),
+        "workspace_enable_thinking": True,
+        "reasoning_effort": reasoning_effort,
         "auto_start_after_inspection": bool(ai_review_stage.get("auto_start_after_inspection", False)),
         "debug_payload_logging": bool(ai_review_stage.get("debug_payload_logging", False)),
         "disable_system_proxy": bool(provider.disable_system_proxy),
@@ -67,7 +74,7 @@ def workspace_chat(messages: list[dict[str, str]], on_delta: Any | None = None) 
                 task_type="ai_review_workspace",
                 prompt=messages[-1]["content"] if messages else "",
                 messages=messages,
-                metadata={"enable_thinking": bool(settings.get("workspace_enable_thinking", False))},
+                metadata=_thinking_metadata(provider_name, provider, str(settings.get("reasoning_effort") or "low")),
             )
             response = await adapter.send_prompt(request)
         finally:
@@ -80,7 +87,7 @@ def workspace_chat(messages: list[dict[str, str]], on_delta: Any | None = None) 
 
 
 def _workspace_chat_stream(messages: list[dict[str, str]], on_delta: Any) -> str:
-    _, provider = _load_provider_settings()
+    provider_name, provider = _load_provider_settings()
     settings = get_shared_ai_settings()
     if not provider.api_key:
         raise SharedProviderError("请先配置模型 API Key")
@@ -94,7 +101,7 @@ def _workspace_chat_stream(messages: list[dict[str, str]], on_delta: Any) -> str
         "temperature": 0.0,
         "stream": True,
     }
-    payload["enable_thinking"] = bool(settings.get("workspace_enable_thinking", False))
+    payload.update(_thinking_metadata(provider_name, provider, str(settings.get("reasoning_effort") or "low")))
     url = provider.base_url.rstrip("/") + "/chat/completions"
     chunks: list[str] = []
     reasoning_started = False
@@ -133,10 +140,14 @@ def _workspace_chat_stream(messages: list[dict[str, str]], on_delta: Any) -> str
                     if reasoning:
                         prefix = "正在思考…\n" if not reasoning_started else ""
                         reasoning_started = True
-                        on_delta(prefix + reasoning)
+                        _send_delta(on_delta, prefix + reasoning, "reasoning")
                     delta = _stream_delta_content(data)
                     if delta:
-                        on_delta(("\n正在生成识别方案…\n" if reasoning_started and not chunks else "") + delta)
+                        _send_delta(
+                            on_delta,
+                            ("\n正在生成识别方案…\n" if reasoning_started and not chunks else "") + delta,
+                            "content",
+                        )
                         chunks.append(delta)
     except httpx.HTTPError as exc:
         raise SharedProviderError(str(exc) or "Workspace Agent 网络请求失败") from exc
@@ -179,6 +190,23 @@ def _stream_response_content(payload: dict[str, Any]) -> str:
         return ""
     message = choices[0].get("message") or {}
     return str(message.get("content") or "") if isinstance(message, dict) else ""
+
+
+def _send_delta(callback: Any, value: str, phase: str) -> None:
+    try:
+        callback(value, phase)
+    except TypeError:
+        callback(value)
+
+
+def _thinking_metadata(provider_name: str, provider: ProviderSettings, effort: str) -> dict[str, Any]:
+    identity = f"{provider_name} {provider.base_url}".lower()
+    if "deepseek" in identity:
+        return {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": effort if effort in {"low", "high", "max"} else "low",
+        }
+    return {"enable_thinking": True}
 
 
 def list_models(api_key: str) -> list[str]:
@@ -234,6 +262,7 @@ def review_chat(
         provider.model = model
         adapter = ProviderRegistry.create_adapter(provider_name, provider)
         try:
+            settings = get_shared_ai_settings()
             request = LLMRequest(
                 task_id="ai-review-batch",
                 task_type="candidate_review_batch",
@@ -242,7 +271,7 @@ def review_chat(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                metadata={"enable_thinking": bool(enable_thinking)},
+                metadata=_thinking_metadata(provider_name, provider, str(settings.get("reasoning_effort") or "low")),
             )
             response = await adapter.send_prompt(request)
         finally:

@@ -332,6 +332,14 @@ def create_workspace_run(
     with get_connection() as conn:
         conn.execute(
             """
+            UPDATE workspace_questions
+            SET status = 'superseded', answered_at = ?
+            WHERE session_id = ? AND status = 'pending'
+            """,
+            (now, session_id),
+        )
+        conn.execute(
+            """
             INSERT INTO workspace_runs (
                 id, session_id, status, model, input_signature, attachment_ids_json, created_at, updated_at
             ) VALUES (?, ?, 'inspecting', ?, ?, ?, ?, ?)

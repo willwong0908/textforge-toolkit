@@ -36,8 +36,8 @@ def get_ai_settings() -> dict[str, Any]:
             "selected_model": "",
             "models": [],
             "max_concurrency": 8,
-            "max_chars_per_request": 3000,
-            "enable_thinking": False,
+            "max_chars_per_request": 20000,
+            "enable_thinking": True,
         },
     )
 
@@ -58,8 +58,8 @@ def public_ai_settings() -> dict[str, Any]:
         "selected_model": settings.get("selected_model", ""),
         "models": settings.get("models", []),
         "max_concurrency": settings.get("max_concurrency", 8),
-        "max_chars_per_request": settings.get("max_chars_per_request", 3000),
-        "enable_thinking": bool(settings.get("enable_thinking", False)),
+        "max_chars_per_request": settings.get("max_chars_per_request", 20000),
+        "enable_thinking": True,
     }
 
 

@@ -201,10 +201,11 @@ def build_default_settings() -> AppSettings:
                 "enable_thinking": False,
             },
             "ai_review_stage_settings": {
-                "batch_request_char_limit": 6000,
+                "batch_request_char_limit": 20000,
                 "max_items_per_request": 80,
-                "enable_thinking": False,
-                "workspace_enable_thinking": False,
+                "enable_thinking": True,
+                "workspace_enable_thinking": True,
+                "reasoning_effort": "low",
                 "auto_start_after_inspection": False,
                 "debug_payload_logging": False,
             },
@@ -550,6 +551,17 @@ class SettingsStore:
             settings.input_defaults["term_review_stage_settings"].setdefault(key, legacy_term_stage.get(key, value))
         for key, value in defaults.input_defaults["ai_review_stage_settings"].items():
             settings.input_defaults["ai_review_stage_settings"].setdefault(key, value)
+        ai_review_stage = settings.input_defaults["ai_review_stage_settings"]
+        try:
+            configured_ai_review_limit = int(ai_review_stage.get("batch_request_char_limit") or 0)
+        except (TypeError, ValueError):
+            configured_ai_review_limit = 0
+        if configured_ai_review_limit <= 6000:
+            ai_review_stage["batch_request_char_limit"] = 20000
+        ai_review_stage["enable_thinking"] = True
+        ai_review_stage["workspace_enable_thinking"] = True
+        if str(ai_review_stage.get("reasoning_effort") or "").strip().lower() not in {"low", "high", "max"}:
+            ai_review_stage["reasoning_effort"] = "low"
         for key, value in defaults.input_defaults["term_stage_settings"].items():
             settings.input_defaults["term_stage_settings"].setdefault(key, value)
 

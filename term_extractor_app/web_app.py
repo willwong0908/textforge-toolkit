@@ -260,6 +260,7 @@ class SettingsPayload(BaseModel):
     ai_review_max_items_per_request: Optional[int] = None
     ai_review_workspace_enable_thinking: Optional[bool] = None
     ai_review_debug_payload_logging: Optional[bool] = None
+    ai_review_reasoning_effort: Optional[str] = None
     nontrans_enable_thinking: Optional[bool] = None
     term_recall_enable_thinking: Optional[bool] = None
     term_review_enable_thinking: Optional[bool] = None
@@ -1197,6 +1198,11 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             ai_review["workspace_enable_thinking"] = bool(payload.ai_review_workspace_enable_thinking)
         if payload.ai_review_debug_payload_logging is not None:
             ai_review["debug_payload_logging"] = bool(payload.ai_review_debug_payload_logging)
+        if payload.ai_review_reasoning_effort is not None:
+            effort = str(payload.ai_review_reasoning_effort or "low").strip().lower()
+            ai_review["reasoning_effort"] = effort if effort in {"low", "high", "max"} else "low"
+        ai_review["enable_thinking"] = True
+        ai_review["workspace_enable_thinking"] = True
         ai_review.pop("workspace_model", None)
         settings.input_defaults["ai_review_stage_settings"] = ai_review
 
@@ -2966,19 +2972,17 @@ INDEX_HTML = """<!doctype html>
               <h3>Agent 与 Workflow</h3>
               <p>Workspace Agent 与 Task Workflow 统一使用“模型设置”中的当前模型和 API 配置。</p>
             </div>
-            <div class="actions review-toggle-row">
-              <label class="check-line"><input id="reviewAiThinking" type="checkbox" /><span>Workflow 深度思考</span></label>
-              <label class="check-line"><input id="reviewWorkspaceThinking" type="checkbox" /><span>Workspace 深度思考</span></label>
-              <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
-            </div>
             <div class="grid two">
-              <label>单包字符预算<input id="reviewAiLimit" type="number" min="500" value="6000" /></label>
+              <label>思考强度<select id="reviewReasoningEffort"><option value="low">低 · 更快</option><option value="high">高 · 更稳</option><option value="max">最高 · 更慢</option></select></label>
+              <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
+              <label>单包字符预算<input id="reviewAiLimit" type="number" min="1000" value="20000" /></label>
               <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="80" /></label>
             </div>
             <div class="actions">
               <button id="saveReviewAgentSettingsButton" class="primary" type="button">保存设置</button>
             </div>
             <div class="notice-list">
+              <div>Workspace 与 Workflow 始终启用模型思考，默认使用低强度以缩短等待时间。</div>
               <div>并发上限直接使用当前 Provider 的真实并发配置。</div>
               <div>调试请求内容默认关闭，避免大量日志拖慢任务。</div>
             </div>
@@ -4876,7 +4880,11 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-message-files { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 .review-message-file { display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid rgba(48, 111, 214, 0.2); border-radius: 10px; background: rgba(255,255,255,0.75); color: #245aa5; text-decoration: none; }
 .review-message-file:hover { border-color: rgba(48, 111, 214, 0.45); background: white; }
-.review-stream-output { max-height: 150px; margin-top: 8px; padding: 10px 12px; overflow: auto; border-radius: 10px; background: #f4f7fa; color: #536174; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.review-stream-output { max-height: 190px; margin-top: 8px; padding: 10px 12px; overflow: auto; border-radius: 10px; background: #f4f7fa; color: #536174; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.review-thinking-details { margin-top: 10px; border: 1px solid #dfe6ec; border-radius: 11px; background: #f7f9fb; overflow: hidden; }
+.review-thinking-details summary { padding: 9px 11px; color: #526175; font-size: 12px; font-weight: 750; cursor: pointer; user-select: none; }
+.review-thinking-details[open] summary { border-bottom: 1px solid #e4e9ee; }
+.review-thinking-details .review-stream-output { max-height: 260px; margin: 0; border-radius: 0; background: #f7f9fb; }
 dialog.modal { width: auto; max-width: none; border: 0; padding: 0; background: transparent; overflow: visible; }
 dialog.modal::backdrop { background: rgba(20, 31, 48, .38); backdrop-filter: blur(2px); }
 .review-attachment-mapping-card { width: min(620px, calc(100vw - 30px)); padding: 0; overflow: hidden; border: 1px solid rgba(207, 218, 229, .9); border-radius: 22px; }
@@ -5043,6 +5051,9 @@ let reviewConversationState = {
   activeTarget: "",
   streamRunId: "",
   streamText: "",
+  streamThinkingText: "",
+  streamAnswerText: "",
+  streamPhase: "reasoning",
   streamActive: false,
   mappingAttachmentId: "",
   mappingEditorAttachmentId: "",
@@ -7228,6 +7239,9 @@ async function openReviewConversation(sessionId) {
   reviewConversationState.currentId = String(sessionId);
   reviewConversationState.streamRunId = "";
   reviewConversationState.streamText = "";
+  reviewConversationState.streamThinkingText = "";
+  reviewConversationState.streamAnswerText = "";
+  reviewConversationState.streamPhase = "reasoning";
   reviewConversationState.streamActive = false;
   reviewConversationState.eventCursor = 0;
   const snapshot = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`);
@@ -7284,6 +7298,18 @@ function renderReviewMessages(messages, questions) {
       });
       item.appendChild(files);
     }
+    const thinkingText = String(message.payload?._thinking_text || "");
+    if (message.kind === "workspace_report" && thinkingText) {
+      const details = document.createElement("details");
+      details.className = "review-thinking-details";
+      const summary = document.createElement("summary");
+      summary.textContent = `查看思考过程 · ${thinkingText.length} 字`;
+      const thinkingOutput = document.createElement("div");
+      thinkingOutput.className = "review-stream-output";
+      thinkingOutput.textContent = thinkingText;
+      details.append(summary, thinkingOutput);
+      item.appendChild(details);
+    }
     const meta = document.createElement("div");
     meta.className = "review-chat-message-meta";
     meta.textContent = String(message.created_at || "").replace("T", " ");
@@ -7295,15 +7321,29 @@ function renderReviewMessages(messages, questions) {
     item.className = "review-chat-message assistant workspace-report";
     const title = document.createElement("strong");
     title.textContent = reviewConversationState.streamText
-      ? `Workspace Agent 正在输出 · 已接收 ${reviewConversationState.streamText.length} 字`
+      ? `${reviewConversationState.streamPhase === "reasoning" ? "Workspace Agent 正在思考" : "Workspace Agent 正在生成方案"} · 已接收 ${reviewConversationState.streamText.length} 字`
       : "Workspace Agent 已连接，等待首个输出…";
+    const details = document.createElement("details");
+    details.className = "review-thinking-details";
+    details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = reviewConversationState.streamPhase === "reasoning" ? "实时思考过程" : "实时模型输出";
     const output = document.createElement("div");
     output.className = "review-stream-output";
-    output.textContent = reviewConversationState.streamText.slice(-2400) || "正在分析文件结构…";
-    item.append(title, output);
+    const liveText = reviewConversationState.streamPhase === "reasoning"
+      ? reviewConversationState.streamThinkingText
+      : reviewConversationState.streamAnswerText;
+    output.textContent = liveText.slice(-5000) || "正在分析文件结构…";
+    details.append(summary, output);
+    item.append(title, details);
     container.appendChild(item);
+    window.requestAnimationFrame(() => {
+      output.scrollTop = output.scrollHeight;
+      container.scrollTop = container.scrollHeight;
+    });
   }
-  questions.filter((question) => question.status === "pending").forEach((question) => {
+  const latestRunId = String(reviewConversationState.snapshot?.workspace_runs?.[0]?.id || "");
+  questions.filter((question) => question.status === "pending" && (!latestRunId || question.run_id === latestRunId)).forEach((question) => {
     const item = document.createElement("div");
     item.className = "review-chat-message assistant";
     const prompt = document.createElement("div");
@@ -7423,6 +7463,8 @@ function connectReviewConversationEvents(sessionId) {
     if (["workspace.ready", "workspace.needs_input", "workspace.failed"].includes(name)) {
       reviewConversationState.streamActive = false;
       reviewConversationState.streamText = "";
+      reviewConversationState.streamThinkingText = "";
+      reviewConversationState.streamAnswerText = "";
     }
     if (name === "workspace.started") renderReviewConversationResults([]);
     scheduleReviewConversationRefresh();
@@ -7432,6 +7474,9 @@ function connectReviewConversationEvents(sessionId) {
     const payload = JSON.parse(event.data || "{}").payload || {};
     reviewConversationState.streamRunId = String(payload.run_id || "");
     reviewConversationState.streamText = "";
+    reviewConversationState.streamThinkingText = "";
+    reviewConversationState.streamAnswerText = "";
+    reviewConversationState.streamPhase = "reasoning";
     reviewConversationState.streamActive = true;
     renderReviewMessages(reviewConversationState.snapshot?.messages || [], reviewConversationState.snapshot?.questions || []);
   });
@@ -7441,7 +7486,12 @@ function connectReviewConversationEvents(sessionId) {
     if (reviewConversationState.streamRunId && payload.run_id !== reviewConversationState.streamRunId) return;
     reviewConversationState.streamRunId = String(payload.run_id || reviewConversationState.streamRunId || "");
     reviewConversationState.streamActive = true;
-    reviewConversationState.streamText += String(payload.delta || "");
+    const delta = String(payload.delta || "");
+    const phase = payload.phase === "content" ? "content" : "reasoning";
+    reviewConversationState.streamPhase = phase;
+    reviewConversationState.streamText += delta;
+    if (phase === "reasoning") reviewConversationState.streamThinkingText += delta;
+    else reviewConversationState.streamAnswerText += delta;
     renderReviewMessages(reviewConversationState.snapshot?.messages || [], reviewConversationState.snapshot?.questions || []);
   });
   source.onerror = () => {
@@ -7932,14 +7982,12 @@ async function loadSettings() {
   $("nontransThinking").checked = Boolean(nontrans.enable_thinking);
   $("recallThinking").checked = Boolean(recall.enable_thinking);
   $("reviewThinking").checked = Boolean(review.enable_thinking);
-  if ($("reviewAiThinking")) {
-    $("reviewAiThinking").checked = Boolean(aiReview.enable_thinking);
-  }
   if ($("reviewAiLimit")) {
-    $("reviewAiLimit").value = aiReview.batch_request_char_limit || 6000;
+    const configuredLimit = Number(aiReview.batch_request_char_limit || 0);
+    $("reviewAiLimit").value = configuredLimit <= 6000 ? 20000 : configuredLimit;
   }
   $("reviewMaxItems").value = aiReview.max_items_per_request || 80;
-  $("reviewWorkspaceThinking").checked = Boolean(aiReview.workspace_enable_thinking);
+  $("reviewReasoningEffort").value = ["low", "high", "max"].includes(aiReview.reasoning_effort) ? aiReview.reasoning_effort : "low";
   $("reviewDebugPayloadLogging").checked = Boolean(aiReview.debug_payload_logging);
   $("builtinRegex").checked = nontrans.builtin_regex_enabled !== false;
   $("aiDiscovery").checked = nontrans.ai_discovery_enabled !== false;
@@ -8014,11 +8062,10 @@ async function saveSettings() {
 
 function reviewSettingsPayload() {
   return {
-    ai_review_batch_char_limit: Number($("reviewAiLimit").value || 6000),
+    ai_review_batch_char_limit: Number($("reviewAiLimit").value || 20000),
     ai_review_max_items_per_request: Number($("reviewMaxItems").value || 80),
-    ai_review_workspace_enable_thinking: $("reviewWorkspaceThinking").checked,
     ai_review_debug_payload_logging: $("reviewDebugPayloadLogging").checked,
-    ai_review_enable_thinking: $("reviewAiThinking").checked,
+    ai_review_reasoning_effort: $("reviewReasoningEffort").value || "low",
   };
 }
 
@@ -9341,9 +9388,6 @@ $("openFeedbackLogButton").addEventListener("click", async () => {
 $("submitFeedbackButton").addEventListener("click", submitFeedback);
 $("enableAiReview").addEventListener("change", updateAiReviewModeVisibility);
 $("enableDirectionalReview").addEventListener("change", updateAiReviewModeVisibility);
-$("reviewAiThinking").addEventListener("change", () => saveReviewSettings().catch((error) => {
-  $("reviewSettingsHint").textContent = error.message;
-}));
 $("reviewAiLimit").addEventListener("change", () => saveReviewSettings().catch((error) => {
   $("reviewSettingsHint").textContent = error.message;
 }));
