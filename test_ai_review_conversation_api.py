@@ -211,6 +211,27 @@ class ConversationApiTests(unittest.TestCase):
         self.assertTrue(first_snapshot["session"]["auto_start"])
         self.assertFalse(second_snapshot["session"]["auto_start"])
 
+    def test_composer_settings_are_saved_per_session_immediately(self) -> None:
+        first_session = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        second_session = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        updated = self.client.patch(
+            f"/api/ai-review/conversations/{first_session}",
+            json={
+                "prompt_template_id": "template-session-one",
+                "source_language": "日语",
+                "target_languages": ["简体中文", "英语"],
+            },
+        )
+        self.assertEqual(updated.status_code, 200)
+        first_snapshot = self.client.get(f"/api/ai-review/conversations/{first_session}").json()
+        second_snapshot = self.client.get(f"/api/ai-review/conversations/{second_session}").json()
+        self.assertEqual(first_snapshot["session"]["prompt_template_id"], "template-session-one")
+        self.assertEqual(first_snapshot["session"]["source_language"], "日语")
+        self.assertEqual(first_snapshot["session"]["target_languages"], ["简体中文", "英语"])
+        self.assertIsNone(second_snapshot["session"]["prompt_template_id"])
+        self.assertEqual(second_snapshot["session"]["source_language"], "auto")
+        self.assertEqual(second_snapshot["session"]["target_languages"], ["auto"])
+
     def test_starting_new_workspace_run_supersedes_old_pending_question(self) -> None:
         session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
         first_run = session_store.create_workspace_run(

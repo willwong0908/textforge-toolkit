@@ -59,6 +59,9 @@ class SessionDeletePayload(BaseModel):
 class SessionUpdatePayload(BaseModel):
     title: str | None = None
     auto_start: bool | None = None
+    prompt_template_id: str | None = None
+    source_language: str | None = None
+    target_languages: list[str] | None = None
 
 
 class AttachmentMappingPayload(BaseModel):
@@ -131,6 +134,12 @@ def update_conversation(session_id: str, payload: SessionUpdatePayload) -> dict[
         updates.update(title=title[:120], title_custom=True)
     if payload.auto_start is not None:
         updates["auto_start"] = bool(payload.auto_start)
+    if payload.prompt_template_id is not None:
+        updates["prompt_template_id"] = payload.prompt_template_id.strip() or None
+    if payload.source_language is not None:
+        updates["source_language"] = payload.source_language.strip() or "auto"
+    if payload.target_languages is not None:
+        updates["target_languages_json"] = payload.target_languages or ["auto"]
     if not updates:
         raise HTTPException(status_code=400, detail="没有可更新的会话设置")
     try:
@@ -227,9 +236,12 @@ def inspect_attachment_structure(session_id: str, attachment_id: str) -> dict[st
         raise HTTPException(status_code=400, detail="已发送附件不能修改导入方式")
     if not str(attachment.get("original_filename") or "").lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="只有 Excel 文件支持手动映射")
+    stored_path = Path(str(attachment.get("stored_path") or ""))
+    if not stored_path.is_file():
+        raise HTTPException(status_code=400, detail="该附件的临时缓存已释放，无法读取结构；请重新添加文件后再编辑映射")
     try:
         document = build_default_registry().read(
-            Path(str(attachment.get("stored_path") or "")),
+            stored_path,
             str(attachment.get("original_filename") or ""),
         )
     except ReaderError as exc:

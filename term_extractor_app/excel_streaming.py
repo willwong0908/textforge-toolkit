@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import BinaryIO, Iterator, Sequence
 
 from openpyxl import load_workbook
 
@@ -22,9 +22,17 @@ def is_streamable_excel(path: str | Path) -> bool:
 
 
 @contextmanager
-def open_streaming_workbook(path: str | Path, *, data_only: bool = True):
+def open_streaming_workbook(
+    path: str | Path | BinaryIO,
+    *,
+    data_only: bool = True,
+    extension_hint: str | None = None,
+):
     """Open an xlsx/xlsm workbook without expanding all cells into memory."""
-    workbook = load_workbook(path, read_only=True, data_only=data_only, keep_vba=Path(path).suffix.lower() == ".xlsm")
+    suffix = (extension_hint or "").lower()
+    if not suffix:
+        suffix = Path(path).suffix.lower() if isinstance(path, (str, Path)) else ""
+    workbook = load_workbook(path, read_only=True, data_only=data_only, keep_vba=suffix == ".xlsm")
     try:
         for worksheet in workbook.worksheets:
             # Some exported files have a stale ``dimension`` value.  Reset it

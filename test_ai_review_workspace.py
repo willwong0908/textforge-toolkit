@@ -12,6 +12,7 @@ from openpyxl import Workbook
 from term_extractor_app.ai_review import cache_service, config, database, session_store
 from term_extractor_app.ai_review.readers import ReaderError, build_default_registry
 from term_extractor_app.ai_review.excel_mapping_service import save_excel_mapping_preset
+from term_extractor_app.ai_review.prompt_service import delete_prompt_template, save_prompt_template
 from term_extractor_app.ai_review.shared_provider import _stream_reasoning_content
 from term_extractor_app.ai_review.workspace_service import (
     _structure_signature,
@@ -559,6 +560,32 @@ class WorkspaceSessionTests(unittest.TestCase):
             self.assertIsNone(conn.execute("SELECT 1 FROM ai_result_cache WHERE cache_key = 'cache-1'").fetchone())
             self.assertEqual(conn.execute("SELECT raw_result_json FROM review_results WHERE id = 'result-1'").fetchone()[0], "{}")
             self.assertIsNotNone(conn.execute("SELECT 1 FROM extraction_profiles WHERE signature = 'structure-profile'").fetchone())
+
+    def test_deleting_prompt_template_rebinds_affected_sessions_to_default(self) -> None:
+        custom = save_prompt_template(
+            template_id=None,
+            name="Session template",
+            system_prompt="Review text.",
+            user_prompt="{text}",
+        )
+        session = session_store.create_session(prompt_template_id=custom["id"])
+        fallback = delete_prompt_template(custom["id"])
+        restored = session_store.get_session(session["id"])
+        self.assertEqual(restored["prompt_template_id"], fallback["id"])
+
+    def test_reader_uses_original_filename_when_private_cache_copy_has_no_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["原文", "译文"])
+            worksheet.append(["Hello", "你好"])
+            opaque_path = Path(directory) / "private-upload"
+            workbook.save(opaque_path)
+
+            document = build_default_registry().read(opaque_path, "mapping.xlsx")
+
+        self.assertEqual(document.file_type, "excel")
+        self.assertEqual(document.structure["sheets"][0]["name"], "Sheet")
 
 
 if __name__ == "__main__":

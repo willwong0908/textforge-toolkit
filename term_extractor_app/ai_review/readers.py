@@ -57,7 +57,13 @@ class ExcelReader(BaseReader):
     def read(self, path: Path, original_filename: str) -> ReaderDocument:
         blocks: list[ReaderBlock] = []
         sheets: list[dict[str, Any]] = []
-        with open_streaming_workbook(path) as workbook:
+        # Openpyxl validates a path's suffix before opening it.  Private cache
+        # filenames can be suffix-less, so pass a binary stream and the original
+        # attachment suffix instead of trusting the cache name.
+        with path.open("rb") as stream, open_streaming_workbook(
+            stream,
+            extension_hint=Path(original_filename).suffix,
+        ) as workbook:
             for sheet in workbook.worksheets:
                 rows = sheet.iter_rows(values_only=True)
                 header_row = next(rows, None) or ()
@@ -353,14 +359,27 @@ class ReaderRegistry:
         for extension in reader.extensions:
             self._readers[extension.lower()] = reader
 
-    def reader_for(self, path: Path) -> BaseReader:
-        reader = self._readers.get(path.suffix.lower())
+    def reader_for(self, path: Path, original_filename: str | None = None) -> BaseReader:
+        """Resolve a reader from the displayed filename when cache files are opaque.
+
+        Uploaded files normally retain their suffix.  A cache migration or an
+        external import can still leave the private stored copy with a UUID-only
+        name, however; its suffix is not authoritative.  The original filename
+        is retained with the attachment and is the correct type hint in that
+        case.
+        """
+        suffix = path.suffix.lower()
+        reader = self._readers.get(suffix)
+        if reader is None and original_filename:
+            suffix = Path(original_filename).suffix.lower()
+            reader = self._readers.get(suffix)
         if reader is None:
-            raise ReaderError(f"暂不支持 {path.suffix or '无扩展名'} 文件，需要安装读取器")
+            raise ReaderError(f"暂不支持 {suffix or '无扩展名'} 文件")
         return reader
 
     def read(self, path: Path, original_filename: str | None = None) -> ReaderDocument:
-        return self.reader_for(path).read(path, original_filename or path.name)
+        display_name = original_filename or path.name
+        return self.reader_for(path, display_name).read(path, display_name)
 
     @property
     def supported_extensions(self) -> tuple[str, ...]:

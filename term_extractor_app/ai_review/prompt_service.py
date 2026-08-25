@@ -154,14 +154,28 @@ def save_prompt_template(
     return get_prompt_template(saved_id)
 
 
-def delete_prompt_template(template_id: str) -> None:
+def delete_prompt_template(template_id: str) -> dict[str, Any]:
+    """Delete a custom template and rebind every affected conversation safely."""
+    ensure_default_prompt_template()
     with get_connection() as conn:
         row = conn.execute("SELECT is_default FROM prompt_templates WHERE id = ?", (template_id,)).fetchone()
         if not row:
             raise ValueError("提示词模板不存在")
         if row["is_default"]:
             raise ValueError("默认提示词模板不能删除，请使用恢复默认")
+        default_row = conn.execute("SELECT id FROM prompt_templates WHERE is_default = 1 LIMIT 1").fetchone()
+        if not default_row:
+            raise ValueError("默认提示词模板不存在")
+        default_id = str(default_row["id"])
         conn.execute("DELETE FROM prompt_templates WHERE id = ?", (template_id,))
+        # A session stores only the selected id. Rebind it in the same
+        # transaction so the composer never displays a fallback name while its
+        # saved id still points to a deleted template.
+        conn.execute(
+            "UPDATE review_sessions SET prompt_template_id = ?, updated_at = ? WHERE prompt_template_id = ?",
+            (default_id, utc_now(), template_id),
+        )
+    return get_prompt_template(default_id)
 
 
 def _template_to_dict(row: Any) -> dict[str, Any]:

@@ -68,10 +68,16 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
 
 def get_session_snapshot(session_id: str) -> dict[str, Any] | None:
-    session = get_session(session_id)
-    if not session:
-        return None
+    init_db()
     with get_connection() as conn:
+        # A chat refresh reads several related tables. Start one read transaction
+        # so it cannot combine a newly-ready Workspace run with the message list
+        # captured just before that run published its report.
+        conn.execute("BEGIN")
+        session_row = conn.execute("SELECT * FROM review_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session_row:
+            return None
+        session = _session_to_dict(session_row)
         attachments = conn.execute(
             "SELECT * FROM review_attachments WHERE session_id = ? ORDER BY created_at",
             (session_id,),

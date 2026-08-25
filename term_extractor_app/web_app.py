@@ -1911,10 +1911,10 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
     @app.delete("/api/ai-review/prompt-templates/{template_id}")
     async def ai_review_delete_prompt_template(template_id: str):
         try:
-            delete_ai_review_prompt_template(template_id)
+            fallback_template = delete_ai_review_prompt_template(template_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"ok": True, "message": "提示词模板已删除"}
+        return {"ok": True, "message": "提示词模板已删除", "fallback_template": fallback_template}
 
     @app.get("/api/ai-review/directional-templates")
     async def ai_review_directional_templates():
@@ -6209,6 +6209,7 @@ let reviewConversationState = {
   sourceLanguage: "auto",
   targetLanguages: ["auto"],
   promptTemplateId: "",
+  composerSaveQueue: Promise.resolve(),
   languageMode: "source",
   activeTarget: "",
   streamRunId: "",
@@ -7841,11 +7842,15 @@ async function openAiReviewPromptDialog() {
 }
 
 function newAiReviewPromptTemplate() {
+  const defaultTemplate = aiReviewPromptTemplates.find((item) => item.is_default) || aiReviewPromptTemplates[0] || {};
   fillAiReviewPromptDialog({
     id: "",
     name: "新建模板",
-    system_prompt: "",
-    user_prompt: "{text}",
+    // A new template starts from the proven complete schema rather than a bare
+    // {text} placeholder, so users can edit review rules without reconstructing
+    // the JSON contract themselves.
+    system_prompt: String(defaultTemplate.system_prompt || ""),
+    user_prompt: String(defaultTemplate.user_prompt || "{text}"),
     forbidden_words_text: "",
     is_default: false,
   });
@@ -7866,6 +7871,7 @@ async function saveAiReviewPromptTemplate() {
   $("promptTemplateSelect").value = String(data?.template?.id || "");
   reviewConversationState.promptTemplateId = String(data?.template?.id || reviewConversationState.promptTemplateId || "");
   updateReviewComposerChips();
+  await saveReviewConversationComposerSettings();
   $("promptDialog").close();
   $("reviewSettingsHint").textContent = data.message || "提示词模板已保存";
 }
@@ -7888,10 +7894,18 @@ async function deleteAiReviewPromptTemplate() {
   if (!window.confirm("确定删除这个提示词模板吗？")) {
     return;
   }
-  await api(`/api/ai-review/prompt-templates/${encodeURIComponent(templateId)}`, {
+  const data = await api(`/api/ai-review/prompt-templates/${encodeURIComponent(templateId)}`, {
     method: "DELETE",
   });
   await loadAiReviewPromptTemplates();
+  const fallbackId = String(data?.fallback_template?.id || aiReviewPromptTemplates[0]?.id || "");
+  reviewConversationState.promptTemplateId = fallbackId;
+  if (reviewConversationState.snapshot?.session) {
+    reviewConversationState.snapshot.session.prompt_template_id = fallbackId || null;
+  }
+  if ($("promptTemplateSelect")) $("promptTemplateSelect").value = fallbackId;
+  updateReviewComposerChips();
+  renderReviewConversationList();
   $("promptDialog").close();
 }
 
@@ -8501,6 +8515,39 @@ async function saveReviewConversationAutoStart(enabled) {
     reviewConversationState.snapshot.session = updated;
   }
   renderReviewConversationList();
+}
+
+function applyReviewConversationSessionUpdate(updated) {
+  if (!updated?.id) return;
+  const sessionIndex = reviewConversationState.sessions.findIndex((item) => item.id === updated.id);
+  if (sessionIndex >= 0) reviewConversationState.sessions[sessionIndex] = updated;
+  if (reviewConversationState.snapshot?.session?.id === updated.id) {
+    reviewConversationState.snapshot.session = updated;
+  }
+  renderReviewConversationList();
+}
+
+function saveReviewConversationComposerSettings() {
+  const sessionId = String(reviewConversationState.currentId || "");
+  if (!sessionId) return Promise.resolve();
+  const payload = {
+    prompt_template_id: reviewConversationState.promptTemplateId || null,
+    source_language: reviewConversationState.sourceLanguage || "auto",
+    target_languages: [...(reviewConversationState.targetLanguages || ["auto"])],
+  };
+  const save = async () => {
+    const data = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    applyReviewConversationSessionUpdate(data.session || {});
+  };
+  // Language chips can be clicked rapidly. Serialize writes so a slower earlier
+  // response cannot overwrite the newest selection for this session.
+  reviewConversationState.composerSaveQueue = reviewConversationState.composerSaveQueue
+    .catch(() => undefined)
+    .then(save);
+  return reviewConversationState.composerSaveQueue;
 }
 
 async function openReviewConversation(sessionId) {
@@ -9151,6 +9198,7 @@ function renderReviewLanguageOptions() {
         reviewConversationState.sourceLanguage = value;
         updateReviewComposerChips();
         closeReviewLanguagePopover();
+        saveReviewConversationComposerSettings().catch(showReviewConversationError);
         return;
       }
       let selected = [...reviewConversationState.targetLanguages];
@@ -9164,6 +9212,7 @@ function renderReviewLanguageOptions() {
       reviewConversationState.targetLanguages = selected;
       updateReviewComposerChips();
       renderReviewLanguageOptions();
+      saveReviewConversationComposerSettings().catch(showReviewConversationError);
     });
     container.appendChild(label);
   });
@@ -10802,6 +10851,7 @@ $("promptDialogTemplateSelect").addEventListener("change", async () => {
   reviewConversationState.promptTemplateId = templateId;
   fillAiReviewPromptDialog(data.template || {});
   updateReviewComposerChips();
+  await saveReviewConversationComposerSettings();
 });
 $("chooseReviewFileButton").addEventListener("click", () => chooseAiReviewFile().catch((error) => {
   $("reviewTaskHint").textContent = error.message;
