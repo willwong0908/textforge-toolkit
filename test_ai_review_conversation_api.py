@@ -4,18 +4,24 @@ import tempfile
 import json
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from term_extractor_app.ai_review import cache_service, config, database, session_store, workspace_service
 from term_extractor_app.ai_review.conversation_routes import router
 
 
+workspace_prompts: list[str] = []
+
+
 def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
     prompt = messages[-1]["content"]
+    workspace_prompts.append(prompt)
     manifests = json.loads(prompt.split("结构清单：\n", 1)[1])
     attachment_id = next(iter(manifests))
     if "没有原文" in prompt:
@@ -37,6 +43,7 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
 
 class ConversationApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        workspace_prompts.clear()
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         self.db_path = root / "data" / "app.sqlite3"
@@ -191,6 +198,52 @@ class ConversationApiTests(unittest.TestCase):
         self.assertTrue(
             all(not unit["source_text"] for target in plan["targets"] for unit in target["units"])
         )
+
+    def test_pending_excel_structure_can_be_read_before_mapping(self) -> None:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "翻译"
+        sheet.append(["原文", "译文", "备注"])
+        sheet.append(["Hello", "你好", "首页"])
+        stream = BytesIO()
+        workbook.save(stream)
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        upload = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments",
+            files={"files": ("mapping.xlsx", stream.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        ).json()
+        attachment_id = upload["attachments"][0]["id"]
+        response = self.client.get(
+            f"/api/ai-review/conversations/{session_id}/attachments/{attachment_id}/structure"
+        )
+        self.assertEqual(response.status_code, 200)
+        structure = response.json()["manifest"]["structure"]
+        self.assertEqual(structure["sheets"][0]["name"], "翻译")
+        self.assertEqual(
+            [item["header"] for item in structure["sheets"][0]["columns"]],
+            ["原文", "译文", "备注"],
+        )
+
+    def test_new_workspace_message_does_not_include_session_history(self) -> None:
+        session_id = self.client.post("/api/ai-review/conversations", json={}).json()["session"]["id"]
+        session_store.add_message(session_id, "user", "message", "NOISE_SENTINEL")
+        self.client.post(
+            f"/api/ai-review/conversations/{session_id}/attachments",
+            files={"files": ("independent.csv", "Source,Target\nHello,你好\n", "text/csv")},
+        )
+        response = self.client.post(
+            f"/api/ai-review/conversations/{session_id}/messages",
+            json={"source_language": "英语", "target_languages": ["简体中文"]},
+        )
+        self.assertEqual(response.status_code, 200)
+        for _ in range(80):
+            snapshot = self.client.get(f"/api/ai-review/conversations/{session_id}").json()
+            if workspace_prompts and snapshot["session"]["status"] in {"ready", "needs_input", "failed"}:
+                break
+            time.sleep(0.05)
+        self.assertTrue(workspace_prompts)
+        self.assertNotIn("NOISE_SENTINEL", workspace_prompts[-1])
+        self.assertIn("普通新消息为空", workspace_prompts[-1])
 
 
 if __name__ == "__main__":

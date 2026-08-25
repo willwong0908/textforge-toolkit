@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .cache_service import create_batch, replace_batch_items
+from .cache_service import create_batch, get_batch, replace_batch_items
 from .database import get_connection, loads_json
 from .prompt_service import get_prompt_template
 from .review_service import create_review_task, get_review_results, get_review_task
@@ -110,10 +110,15 @@ def get_session_task_results(session_id: str) -> list[dict[str, Any]]:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
         raise ValueError("审校会话不存在")
+    latest_run_id = str(snapshot.get("workspace_runs", [{}])[0].get("id") or "") if snapshot.get("workspace_runs") else ""
     result: list[dict[str, Any]] = []
     for link in snapshot["tasks"]:
         task = get_review_task(link["task_id"])
         if not task:
+            continue
+        batch = get_batch(str(task.get("batch_id") or "")) or {}
+        task_run_id = str((batch.get("metadata") or {}).get("workspace_run_id") or "")
+        if latest_run_id and task_run_id != latest_run_id:
             continue
         result.append(
             {

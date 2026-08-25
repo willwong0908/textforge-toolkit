@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile
@@ -26,6 +27,7 @@ from .session_store import (
     update_attachment,
 )
 from .excel_mapping_service import get_excel_mapping_preset
+from .readers import ReaderError, build_default_registry
 from .workflow_service import get_session_task_results, start_session_review
 from .workspace_service import submit_workspace_inspection
 from ..telemetry import track_event
@@ -159,6 +161,33 @@ def configure_attachment_mapping(
     return {"ok": True, "attachment": updated}
 
 
+@router.get("/{session_id}/attachments/{attachment_id}/structure")
+def inspect_attachment_structure(session_id: str, attachment_id: str) -> dict[str, Any]:
+    attachment = get_attachment(attachment_id)
+    if not attachment or attachment["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    if attachment.get("sent_at"):
+        raise HTTPException(status_code=400, detail="已发送附件不能修改导入方式")
+    if not str(attachment.get("original_filename") or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="只有 Excel 文件支持手动映射")
+    try:
+        document = build_default_registry().read(
+            Path(str(attachment.get("stored_path") or "")),
+            str(attachment.get("original_filename") or ""),
+        )
+    except ReaderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    manifest = document.to_manifest()
+    updated = update_attachment(
+        attachment_id,
+        file_type=document.file_type,
+        status="ready",
+        manifest_json=manifest,
+        error_message="",
+    )
+    return {"attachment": updated, "manifest": manifest}
+
+
 @router.delete("/{session_id}/attachments/{attachment_id}")
 def remove_pending_attachment(session_id: str, attachment_id: str) -> dict[str, Any]:
     try:
@@ -236,6 +265,7 @@ def submit_decision(session_id: str, payload: WorkspaceDecisionPayload) -> dict[
             "",
             adjustment_text=payload.answer,
             attachment_ids=list((source_run or {}).get("attachment_ids") or []),
+            parent_run_id=str(payload.run_id or ""),
         )
         return {"ok": True, "run_id": run_id}
     except ValueError as exc:

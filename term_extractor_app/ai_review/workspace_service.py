@@ -19,7 +19,6 @@ from .session_store import (
     create_workspace_run,
     emit_event,
     get_session_snapshot,
-    recent_context,
     update_attachment,
     update_session,
     update_workspace_run,
@@ -48,8 +47,8 @@ WORKSPACE_USER_PROMPT = """请检查以下本地解析器生成的结构清单�
 用户指定源语言：{source_language}
 用户指定目标语言：{target_languages}
 用户本轮调整要求：{adjustment_text}
-最近对话（最多 12 轮，仅用于理解用户已确认的映射）：
-{conversation_json}
+本轮待调整的上一版识别方案（只有用户从“其他：自行输入”补充时才提供；普通新消息为空）：
+{adjustment_context_json}
 结构清单：
 {manifest_json}"""
 
@@ -61,6 +60,7 @@ def submit_workspace_inspection(
     adjustment_text: str = "",
     attachment_ids: list[str] | None = None,
     record_user_message: bool = True,
+    parent_run_id: str = "",
 ) -> str:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
@@ -86,7 +86,7 @@ def submit_workspace_inspection(
     emit_event(session_id, "workspace.started", {"run_id": run["id"]})
     thread = threading.Thread(
         target=_run_inspection,
-        args=(session_id, run["id"], direct_text, adjustment_text, effective_attachment_ids),
+        args=(session_id, run["id"], direct_text, adjustment_text, effective_attachment_ids, parent_run_id),
         daemon=True,
     )
     thread.start()
@@ -99,6 +99,7 @@ def inspect_workspace_sync(
     *,
     adjustment_text: str = "",
     attachment_ids: list[str] | None = None,
+    parent_run_id: str = "",
 ) -> dict[str, Any]:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
@@ -115,7 +116,7 @@ def inspect_workspace_sync(
         input_signature=_input_signature(snapshot, direct_text, adjustment_text, effective_attachment_ids),
         attachment_ids=effective_attachment_ids,
     )
-    return _inspect(session_id, run["id"], direct_text, adjustment_text, effective_attachment_ids)
+    return _inspect(session_id, run["id"], direct_text, adjustment_text, effective_attachment_ids, parent_run_id)
 
 
 def _run_inspection(
@@ -124,9 +125,10 @@ def _run_inspection(
     direct_text: str,
     adjustment_text: str,
     attachment_ids: list[str],
+    parent_run_id: str,
 ) -> None:
     try:
-        _inspect(session_id, run_id, direct_text, adjustment_text, attachment_ids)
+        _inspect(session_id, run_id, direct_text, adjustment_text, attachment_ids, parent_run_id)
     except Exception as exc:
         message = str(exc) or repr(exc)
         update_workspace_run(run_id, status="failed", error=message)
@@ -142,6 +144,7 @@ def _inspect(
     direct_text: str,
     adjustment_text: str = "",
     attachment_ids: list[str] | None = None,
+    parent_run_id: str = "",
 ) -> dict[str, Any]:
     snapshot = get_session_snapshot(session_id)
     if snapshot is None:
@@ -248,6 +251,7 @@ def _inspect(
             direct_text=direct_text,
             adjustment_text=adjustment,
             run_id=run_id,
+            parent_run_id=parent_run_id,
         )
         if refined is not None:
             plan = refined
@@ -686,6 +690,7 @@ def _refine_with_model(
     direct_text: str = "",
     adjustment_text: str = "",
     run_id: str = "",
+    parent_run_id: str = "",
 ) -> ExtractionPlan | None:
     settings = get_shared_ai_settings()
     if not str(settings.get("api_key") or "").strip() or not str(settings.get("selected_model") or "").strip():
@@ -712,8 +717,8 @@ def _refine_with_model(
         source_language=session["source_language"],
         target_languages=json.dumps(session["target_languages"], ensure_ascii=False),
         adjustment_text=adjustment_text or "无",
-        conversation_json=json.dumps(
-            recent_context(session["id"], limit=24, max_chars=32000),
+        adjustment_context_json=json.dumps(
+            _workspace_adjustment_context(session["id"], parent_run_id) if adjustment_text.strip() else {},
             ensure_ascii=False,
         ),
         manifest_json=json.dumps(manifests, ensure_ascii=False),
@@ -722,15 +727,16 @@ def _refine_with_model(
         pending_chunks: list[str] = []
         received_chars = 0
         last_emit = time.monotonic()
+        emitted_any = False
 
         def emit_delta(delta: str) -> None:
-            nonlocal received_chars, last_emit
+            nonlocal received_chars, last_emit, emitted_any
             value = str(delta or "")
             if value:
                 pending_chunks.append(value)
                 received_chars += len(value)
             now = time.monotonic()
-            if pending_chunks and (sum(map(len, pending_chunks)) >= 64 or now - last_emit >= 0.12):
+            if pending_chunks and (not emitted_any or sum(map(len, pending_chunks)) >= 64 or now - last_emit >= 0.12):
                 emit_event(
                     session["id"],
                     "workspace.delta",
@@ -738,6 +744,7 @@ def _refine_with_model(
                 )
                 pending_chunks.clear()
                 last_emit = now
+                emitted_any = True
 
         emit_event(session["id"], "workspace.output_started", {"run_id": run_id})
         raw = workspace_chat(
@@ -762,6 +769,17 @@ def _refine_with_model(
         return plan
     except (SharedProviderError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _workspace_adjustment_context(session_id: str, parent_run_id: str) -> dict[str, Any]:
+    if not parent_run_id:
+        return {}
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT plan_json FROM workspace_runs WHERE id = ? AND session_id = ?",
+            (parent_run_id, session_id),
+        ).fetchone()
+    return loads_json(row["plan_json"], {}) if row else {}
 
 
 def _plan_from_agent(

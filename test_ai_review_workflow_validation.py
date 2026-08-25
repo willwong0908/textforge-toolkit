@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
+from term_extractor_app.ai_review import workflow_service
 from term_extractor_app.ai_review.review_service import (
     ReviewTaskError,
     _build_packages,
@@ -61,6 +63,44 @@ class ReviewWorkflowValidationTests(unittest.TestCase):
         del item["suggestion"]
         with self.assertRaises(ReviewTaskError):
             _validate_response_items({"items": [item]}, [_request_item("a")], {"mode": "normal"})
+
+    def test_conversation_preview_only_returns_latest_workspace_run(self) -> None:
+        snapshot = {
+            "workspace_runs": [{"id": "run-new"}, {"id": "run-old"}],
+            "tasks": [
+                {"task_id": "task-old", "target_language": "ko"},
+                {"task_id": "task-new", "target_language": "en"},
+            ],
+        }
+        tasks = {
+            "task-old": {"id": "task-old", "batch_id": "batch-old", "output_path": "old.xlsx"},
+            "task-new": {"id": "task-new", "batch_id": "batch-new", "output_path": "new.xlsx"},
+        }
+        batches = {
+            "batch-old": {"metadata": {"workspace_run_id": "run-old"}},
+            "batch-new": {"metadata": {"workspace_run_id": "run-new"}},
+        }
+        with (
+            patch.object(workflow_service, "get_session_snapshot", return_value=snapshot),
+            patch.object(workflow_service, "get_review_task", side_effect=lambda task_id: tasks[task_id]),
+            patch.object(workflow_service, "get_batch", side_effect=lambda batch_id: batches[batch_id]),
+            patch.object(workflow_service, "get_review_results", return_value=[]),
+        ):
+            results = workflow_service.get_session_task_results("session")
+        self.assertEqual([item["target_language"] for item in results], ["en"])
+        self.assertEqual(results[0]["task"]["output_path"], "new.xlsx")
+
+    def test_new_workspace_run_hides_previous_results_before_tasks_exist(self) -> None:
+        snapshot = {
+            "workspace_runs": [{"id": "run-new"}, {"id": "run-old"}],
+            "tasks": [{"task_id": "task-old", "target_language": "ko"}],
+        }
+        with (
+            patch.object(workflow_service, "get_session_snapshot", return_value=snapshot),
+            patch.object(workflow_service, "get_review_task", return_value={"id": "task-old", "batch_id": "batch-old"}),
+            patch.object(workflow_service, "get_batch", return_value={"metadata": {"workspace_run_id": "run-old"}}),
+        ):
+            self.assertEqual(workflow_service.get_session_task_results("session"), [])
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from openpyxl import Workbook
 from term_extractor_app.ai_review import cache_service, config, database, session_store
 from term_extractor_app.ai_review.readers import ReaderError, build_default_registry
 from term_extractor_app.ai_review.excel_mapping_service import save_excel_mapping_preset
+from term_extractor_app.ai_review.shared_provider import _stream_reasoning_content
 from term_extractor_app.ai_review.workspace_service import (
     _structure_signature,
     inspect_workspace_sync,
@@ -59,6 +60,10 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
 
 
 class ReaderRegistryTests(unittest.TestCase):
+    def test_stream_reasoning_delta_is_exposed(self) -> None:
+        payload = {"choices": [{"delta": {"reasoning_content": "正在判断工作表"}}]}
+        self.assertEqual(_stream_reasoning_content(payload), "正在判断工作表")
+
     def test_reads_excel_csv_json_and_docx(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

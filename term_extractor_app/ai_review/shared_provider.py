@@ -97,6 +97,7 @@ def _workspace_chat_stream(messages: list[dict[str, str]], on_delta: Any) -> str
     payload["enable_thinking"] = bool(settings.get("workspace_enable_thinking", False))
     url = provider.base_url.rstrip("/") + "/chat/completions"
     chunks: list[str] = []
+    reasoning_started = False
     try:
         with httpx.Client(
             timeout=float(max(10, provider.timeout_seconds)),
@@ -128,9 +129,14 @@ def _workspace_chat_stream(messages: list[dict[str, str]], on_delta: Any) -> str
                         data = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
+                    reasoning = _stream_reasoning_content(data)
+                    if reasoning:
+                        prefix = "正在思考…\n" if not reasoning_started else ""
+                        reasoning_started = True
+                        on_delta(prefix + reasoning)
                     delta = _stream_delta_content(data)
-                    on_delta(delta)
                     if delta:
+                        on_delta(("\n正在生成识别方案…\n" if reasoning_started and not chunks else "") + delta)
                         chunks.append(delta)
     except httpx.HTTPError as exc:
         raise SharedProviderError(str(exc) or "Workspace Agent 网络请求失败") from exc
@@ -154,6 +160,17 @@ def _stream_delta_content(payload: dict[str, Any]) -> str:
             if isinstance(item, dict) and item.get("type") == "text"
         )
     return str(content)
+
+
+def _stream_reasoning_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    delta = choices[0].get("delta") or {}
+    if not isinstance(delta, dict):
+        return ""
+    value = delta.get("reasoning_content") or delta.get("reasoning") or ""
+    return str(value)
 
 
 def _stream_response_content(payload: dict[str, Any]) -> str:
