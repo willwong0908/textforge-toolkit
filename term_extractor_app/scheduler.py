@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import math
 import random
+import time
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from .models import LLMRequest, LLMResponse, SchedulerSnapshot
@@ -12,6 +13,7 @@ from .models import LLMRequest, LLMResponse, SchedulerSnapshot
 
 ResultCallback = Callable[[LLMRequest, LLMResponse, SchedulerSnapshot], Optional[Awaitable[None]]]
 ResponseValidator = Callable[[LLMRequest, LLMResponse], LLMResponse]
+RetryCallback = Callable[[LLMRequest, LLMResponse, int, float], Optional[Awaitable[None]]]
 
 
 class SchedulerCancelledError(Exception):
@@ -57,12 +59,18 @@ class AsyncRequestScheduler:
         max_retries: int,
         stop_requested: Callable[[], bool],
         response_validator: Optional[ResponseValidator] = None,
+        attempt_timeout_seconds: Optional[float] = None,
+        on_retry: Optional[RetryCallback] = None,
     ):
         self.adapter = adapter
         self.controller = controller
         self.max_retries = max(0, int(max_retries))
         self.stop_requested = stop_requested
         self.response_validator = response_validator
+        self.attempt_timeout_seconds = (
+            max(0.1, float(attempt_timeout_seconds)) if attempt_timeout_seconds is not None else None
+        )
+        self.on_retry = on_retry
         self.processed_count = 0
         self.success_count = 0
         self.failure_count = 0
@@ -83,6 +91,8 @@ class AsyncRequestScheduler:
             await queue.put(request)
 
         worker_count = self.controller.effective_max
+
+        fatal_errors: List[Exception] = []
 
         async def worker(worker_index: int) -> None:
             while True:
@@ -127,6 +137,15 @@ class AsyncRequestScheduler:
                         callback_result = on_result(request, response, snapshot)
                         if inspect.isawaitable(callback_result):
                             await callback_result
+                except SchedulerCancelledError:
+                    self._drain_queue(queue)
+                    return
+                except Exception as exc:
+                    # Never let a worker disappear while queue.join() is waiting.
+                    # The caller receives the failure and can persist a terminal task state.
+                    fatal_errors.append(exc)
+                    self._drain_queue(queue)
+                    return
                 finally:
                     queue.task_done()
 
@@ -135,6 +154,8 @@ class AsyncRequestScheduler:
         for task in workers:
             task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        if fatal_errors:
+            raise RuntimeError(f"请求调度器内部异常：{fatal_errors[0]}") from fatal_errors[0]
         return results
 
     async def _execute_request(self, request: LLMRequest) -> LLMResponse:
@@ -168,11 +189,16 @@ class AsyncRequestScheduler:
 
             self.retry_count += 1
             backoff = min(6.0, 0.8 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.4)
+            if self.on_retry is not None:
+                callback_result = self.on_retry(request, response, attempt + 1, backoff)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
             await self._sleep_with_cancellation(backoff)
             attempt += 1
 
     async def _send_with_cancellation(self, request: LLMRequest, attempt: int) -> LLMResponse:
         task = asyncio.create_task(self.adapter.send_prompt(request, attempt=attempt))
+        started_at = time.monotonic()
         try:
             while not task.done():
                 if self.stop_requested():
@@ -180,6 +206,27 @@ class AsyncRequestScheduler:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
                     raise SchedulerCancelledError()
+                if (
+                    self.attempt_timeout_seconds is not None
+                    and time.monotonic() - started_at >= self.attempt_timeout_seconds
+                ):
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    timeout_seconds = self.attempt_timeout_seconds
+                    return LLMResponse(
+                        task_id=request.task_id,
+                        task_type=request.task_type,
+                        content="",
+                        provider=getattr(self.adapter, "provider_name", ""),
+                        model=getattr(getattr(self.adapter, "settings", None), "model", ""),
+                        latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                        attempts=attempt,
+                        success=False,
+                        error=f"单次请求超过 {timeout_seconds:g} 秒，已取消",
+                        error_type="hard_timeout",
+                        retryable=True,
+                    )
                 await asyncio.sleep(0.1)
             return await task
         except asyncio.CancelledError:

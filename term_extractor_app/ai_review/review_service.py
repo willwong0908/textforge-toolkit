@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import traceback
 import threading
 import uuid
@@ -16,6 +17,7 @@ from .prompt_service import get_prompt_template
 from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings
 from .session_store import emit_event
 from ..models import LLMRequest, LLMResponse
+from ..logging_utils import LOGGER_NAME, configure_file_logger
 from ..providers import ProviderRegistry
 from ..scheduler import AdaptiveConcurrencyController, AsyncRequestScheduler
 from ..telemetry import infer_model_tier, track_event
@@ -198,9 +200,36 @@ def get_review_task(task_id: str) -> dict[str, Any] | None:
     task["request_states"] = request_states
     task["request_status_counts"] = {
         status: sum(1 for item in request_states if item["status"] == status)
-        for status in ("queued", "submitted", "thinking", "output", "completed", "failed")
+        for status in ("queued", "submitted", "thinking", "output", "retrying", "completed", "failed")
     }
     return task
+
+
+def recover_interrupted_review_tasks() -> int:
+    """Close tasks whose daemon worker disappeared during a previous app process."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM review_tasks WHERE status IN ('pending', 'running')"
+        ).fetchall()
+        task_ids = [str(row["id"]) for row in rows]
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            now = utc_now()
+            conn.execute(
+                f"UPDATE review_tasks SET status = 'failed', updated_at = ? WHERE id IN ({placeholders})",
+                (now, *task_ids),
+            )
+            conn.execute(
+                f"""
+                UPDATE review_request_states
+                SET status = 'failed', updated_at = ?
+                WHERE task_id IN ({placeholders}) AND status NOT IN ('completed', 'failed')
+                """,
+                (now, *task_ids),
+            )
+    for task_id in task_ids:
+        _add_log(task_id, "error", "应用上次退出时任务仍未结束，已标记为中断；请重新发起审校。")
+    return len(task_ids)
 
 
 def get_review_logs(task_id: str, after_id: int = 0) -> list[dict[str, Any]]:
@@ -434,6 +463,19 @@ def _format_followup_context(item: dict[str, Any], config: dict[str, Any]) -> st
 
 
 def _run_review_task(task_id: str) -> None:
+    try:
+        _run_review_task_impl(task_id)
+    except Exception as exc:  # pragma: no cover - runtime safety net
+        message = f"任务异常终止：{type(exc).__name__}: {exc}"
+        _add_log(task_id, "error", message)
+        _mark_unfinished_review_requests_failed(task_id)
+        task = get_review_task(task_id)
+        if task:
+            _update_task(task_id, status="failed")
+            _track_ai_review_finish(task.get("config") or {}, success=False)
+
+
+def _run_review_task_impl(task_id: str) -> None:
     task = get_review_task(task_id)
     if not task:
         return
@@ -559,6 +601,13 @@ async def _run_review_packages(
 
     provider_name, provider_settings = _load_review_provider(api_key, model)
     adapter = ProviderRegistry.create_adapter(provider_name, provider_settings)
+
+    def on_stream_phase(package_index: int, phase: str) -> None:
+        _set_review_request_status(task_id, package_index, phase)
+        phase_label = {"thinking": "思考", "output": "输出"}.get(str(phase))
+        if phase_label:
+            _add_log(task_id, "info", f"第 {package_index}/{len(packages)} 包进入{phase_label}阶段。")
+
     requests: list[LLMRequest] = []
     for index, package in enumerate(packages, start=1):
         payload: dict[str, Any] = {"items": [_payload_item(item) for item in package]}
@@ -580,8 +629,8 @@ async def _run_review_packages(
             "package": package,
         }
         if "deepseek" in f"{provider_name} {provider_settings.base_url}".lower():
-            metadata["stream_phase_callback"] = lambda phase, package_index=index: _set_review_request_status(
-                task_id, package_index, phase
+            metadata["stream_phase_callback"] = lambda phase, package_index=index: on_stream_phase(
+                package_index, phase
             )
         requests.append(
             LLMRequest(
@@ -709,6 +758,17 @@ async def _run_review_packages(
             _update_task(task_id, requested_count=requested_count)
         _set_review_request_status(task_id, package_index, "submitted", 1)
 
+    def on_retry(request: LLMRequest, response: LLMResponse, next_attempt: int, backoff: float) -> None:
+        package_index = int(request.metadata.get("package_index") or 0)
+        _set_review_request_status(task_id, package_index, "retrying", next_attempt)
+        reason = str(response.error_type or "request_failed")
+        _add_log(
+            task_id,
+            "warning",
+            f"第 {package_index}/{len(packages)} 包触发重试；原因 {reason}；"
+            f"{backoff:.1f} 秒后进行第 {next_attempt} 次请求。",
+        )
+
     original_send_prompt = adapter.send_prompt
 
     async def logged_send_prompt(request: LLMRequest, attempt: int = 1) -> LLMResponse:
@@ -737,12 +797,16 @@ async def _run_review_packages(
         max_retries=2,
         stop_requested=lambda: False,
         response_validator=validate_response,
+        attempt_timeout_seconds=max(10, int(provider_settings.timeout_seconds or 90)),
+        on_retry=on_retry,
     )
     try:
         _add_log(
             task_id,
             "info",
-            f"开始 AI 审校，共 {len(packages)} 包；自动并发从 {controller.current_concurrency} 路启动，最高 {controller.effective_max} 路。",
+            f"开始 AI 审校，共 {len(packages)} 包；模型 {model}；自动并发从 "
+            f"{controller.current_concurrency} 路启动，最高 {controller.effective_max} 路；"
+            f"单次请求硬超时 {max(10, int(provider_settings.timeout_seconds or 90))} 秒；最多请求 3 次。",
         )
         await scheduler.run(requests, on_result=on_result, on_request_started=on_request_started)
     finally:
@@ -1202,7 +1266,7 @@ def _replace_review_request_states(task_id: str, packages: list[list[dict[str, A
 
 
 def _set_review_request_status(task_id: str, package_index: int, status: str, attempt_count: int | None = None) -> None:
-    if status not in {"queued", "submitted", "thinking", "output", "completed", "failed"}:
+    if status not in {"queued", "submitted", "thinking", "output", "retrying", "completed", "failed"}:
         return
     assignments = ["status = ?", "updated_at = ?"]
     values: list[Any] = [status, utc_now()]
@@ -1239,7 +1303,7 @@ def _request_state_to_dict(row: Any) -> dict[str, Any]:
     status = str(row["status"] or "queued")
     label_map = {
         "queued": "排队中", "submitted": "已提交 · 等待首段", "thinking": "思考中",
-        "output": "输出中", "completed": "已完成", "failed": "失败",
+        "output": "输出中", "retrying": "等待重试", "completed": "已完成", "failed": "失败",
     }
     location = " / ".join(
         item for item in (str(row["first_source_file"] or ""), str(row["first_sheet_name"] or "")) if item
@@ -1263,7 +1327,23 @@ def _add_log(task_id: str, level: str, message: str) -> None:
             """,
             (task_id, level, message, timestamp),
         )
-    print(f"[AI_REVIEW][{timestamp}][{level.upper()}][{task_id}] {message}", flush=True)
+    logger = logging.getLogger(LOGGER_NAME)
+    if not logger.handlers:
+        logger = configure_file_logger(with_console=True)
+    log_method = getattr(logger, str(level or "info").lower(), logger.info)
+    log_method("[AI_REVIEW][%s] %s", task_id, message)
+
+
+def _mark_unfinished_review_requests_failed(task_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE review_request_states
+            SET status = 'failed', updated_at = ?
+            WHERE task_id = ? AND status NOT IN ('completed', 'failed')
+            """,
+            (utc_now(), task_id),
+        )
 
 
 def _track_ai_review_start(config: dict[str, Any]) -> None:

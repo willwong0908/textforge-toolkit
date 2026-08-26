@@ -73,6 +73,7 @@ if __package__:
         get_review_logs,
         get_review_results,
         get_review_task,
+        recover_interrupted_review_tasks,
         send_review_followup_message,
     )
     from .ai_review.shared_provider import (
@@ -176,6 +177,7 @@ else:
         get_review_logs,
         get_review_results,
         get_review_task,
+        recover_interrupted_review_tasks,
         send_review_followup_message,
     )
     from term_extractor_app.ai_review.shared_provider import (
@@ -1003,6 +1005,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
     diff_task_service = DiffTaskService()
     app = FastAPI(title="AI Term Extractor WebUI")
     init_ai_review_db()
+    recover_interrupted_review_tasks()
     app.include_router(ai_review_conversation_router)
 
     @app.get("/", response_class=HTMLResponse)
@@ -6102,6 +6105,7 @@ input:disabled, select:disabled {
 .review-request-lane.status-submitted .review-request-lane-head { box-shadow: inset 3px 0 0 #78a8ff; }
 .review-request-lane.status-thinking .review-request-lane-head { box-shadow: inset 3px 0 0 #b28cff; }
 .review-request-lane.status-output .review-request-lane-head { box-shadow: inset 3px 0 0 #5ed4c1; }
+.review-request-lane.status-retrying .review-request-lane-head { box-shadow: inset 3px 0 0 #e3b85b; }
 .review-request-lane.status-completed .review-request-lane-head { box-shadow: inset 3px 0 0 #72c992; }
 .review-request-lane.status-failed .review-request-lane-head { box-shadow: inset 3px 0 0 #ee8793; }
 .review-request-items { display: grid; gap: 6px; padding: 8px; }
@@ -7311,6 +7315,7 @@ const REVIEW_REQUEST_STATUS_LANES = [
   ["submitted", "已提交"],
   ["thinking", "思考中"],
   ["output", "输出中"],
+  ["retrying", "等待重试"],
   ["completed", "已完成"],
   ["failed", "失败"],
 ];
