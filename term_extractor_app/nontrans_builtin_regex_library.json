@@ -48,9 +48,9 @@
       "enabled": true,
       "order_index": 3,
       "examples": [
-        "</size>",
-        "</div>",
-        "</color>"
+        "</i>",
+        "</width>",
+        "</b>"
       ],
       "source": "builtin",
       "conflict_notes": ""
@@ -84,9 +84,9 @@
       "enabled": true,
       "order_index": 5,
       "examples": [
-        "{2}",
-        "{3}",
-        "{4}"
+        "{0}",
+        "{0:SUBMITTED_COLLECTION_ITEM_COUNT}",
+        "{1}"
       ],
       "source": "builtin",
       "conflict_notes": ""
@@ -171,7 +171,8 @@
       "order_index": 10,
       "examples": [
         "\\n",
-        "\\u3000"
+        "\\u3000",
+        "\\r"
       ],
       "source": "builtin",
       "conflict_notes": ""

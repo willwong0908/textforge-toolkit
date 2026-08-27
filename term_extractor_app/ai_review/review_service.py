@@ -19,6 +19,12 @@ from .session_store import emit_event
 from ..models import LLMRequest, LLMResponse
 from ..logging_utils import LOGGER_NAME, configure_file_logger
 from ..providers import ProviderRegistry
+from ..recovery_supervisor import (
+    TerminalFailureContext,
+    is_ai_correctable_response_failure,
+    request_terminal_recovery_sync,
+    retry_llm_with_corrective_prompt,
+)
 from ..scheduler import AdaptiveConcurrencyController, AsyncRequestScheduler
 from ..telemetry import infer_model_tier, track_event
 
@@ -209,7 +215,7 @@ def recover_interrupted_review_tasks() -> int:
     """Close tasks whose daemon worker disappeared during a previous app process."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id FROM review_tasks WHERE status IN ('pending', 'running')"
+            "SELECT id FROM review_tasks WHERE status IN ('pending', 'running', 'recovering')"
         ).fetchall()
         task_ids = [str(row["id"]) for row in rows]
         if task_ids:
@@ -463,16 +469,57 @@ def _format_followup_context(item: dict[str, Any], config: dict[str, Any]) -> st
 
 
 def _run_review_task(task_id: str) -> None:
-    try:
-        _run_review_task_impl(task_id)
-    except Exception as exc:  # pragma: no cover - runtime safety net
-        message = f"任务异常终止：{type(exc).__name__}: {exc}"
-        _add_log(task_id, "error", message)
-        _mark_unfinished_review_requests_failed(task_id)
-        task = get_review_task(task_id)
-        if task:
-            _update_task(task_id, status="failed")
-            _track_ai_review_finish(task.get("config") or {}, success=False)
+    for run_index in range(2):
+        try:
+            _run_review_task_impl(task_id)
+            return
+        except Exception as exc:  # pragma: no cover - runtime safety net
+            message = f"任务异常终止：{type(exc).__name__}: {exc}"
+            _add_log(task_id, "error", message)
+            task = get_review_task(task_id)
+            if run_index == 0 and task and _attempt_review_task_terminal_recovery(task_id, task, exc):
+                continue
+            _mark_unfinished_review_requests_failed(task_id)
+            if task:
+                _update_task(task_id, status="failed")
+                _track_ai_review_finish(task.get("config") or {}, success=False)
+            return
+
+
+def _attempt_review_task_terminal_recovery(task_id: str, task: dict[str, Any], exc: Exception) -> bool:
+    request_states = list(task.get("request_states") or [])
+    completed_units = sum(
+        int(item.get("item_count") or 0) for item in request_states if item.get("status") == "completed"
+    )
+    total_units = sum(int(item.get("item_count") or 0) for item in request_states)
+    recent_logs = _get_recent_review_log_messages(task_id, limit=6)
+    _update_task(task_id, status="recovering")
+    _add_log(task_id, "warning", "任务即将进入失败状态，正在启动最后一次 Recovery Agent 兜底。")
+    decision = request_terminal_recovery_sync(
+        TerminalFailureContext(
+            workflow="ai_review",
+            task_id=task_id,
+            phase="task_runtime",
+            error_type=type(exc).__name__,
+            message=str(exc),
+            has_checkpoint=True,
+            completed_units=completed_units,
+            remaining_units=max(0, total_units - completed_units),
+            metadata={
+                "target_language": str(task.get("target_language") or ""),
+                "recent_events": [str(item or "")[-500:] for item in recent_logs],
+            },
+        ),
+        allowed_actions=("retry_task", "abort"),
+    )
+    if decision.error:
+        _add_log(task_id, "error", f"Recovery Agent 未能形成可执行方案：{decision.error}")
+        return False
+    _add_log(task_id, "warning", f"Recovery Agent 决策：{decision.action}；{decision.reason or '未提供说明'}")
+    if decision.action != "retry_task":
+        return False
+    _add_log(task_id, "warning", "Recovery Agent 已批准从未完成条目继续；该动作最多执行一次。")
+    return True
 
 
 def _run_review_task_impl(task_id: str) -> None:
@@ -501,9 +548,12 @@ def _run_review_task_impl(task_id: str) -> None:
         )
         directional_signature = _directional_signature(config)
         enable_thinking = bool(config.get("enable_thinking", False))
+        existing_completed_ids = _get_completed_review_item_ids(task_id)
         request_items = []
         cached_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for item in items:
+            if item["id"] in existing_completed_ids:
+                continue
             cache_key = _cache_key(
                 item["source_text"],
                 item["target_text"],
@@ -523,7 +573,8 @@ def _run_review_task_impl(task_id: str) -> None:
         if cached_pairs:
             _save_review_results_bulk(task_id, cached_pairs, status="cached")
         cached_count = len(cached_pairs)
-        _update_task(task_id, cached_count=cached_count, completed_count=cached_count)
+        initial_completed = len(existing_completed_ids) + cached_count
+        _update_task(task_id, cached_count=cached_count, completed_count=initial_completed)
 
         packages = _build_packages(
             request_items,
@@ -538,7 +589,7 @@ def _run_review_task_impl(task_id: str) -> None:
                 model=model,
                 config=config,
                 packages=packages,
-                initial_completed=cached_count,
+                initial_completed=initial_completed,
             )
         )
     else:
@@ -649,6 +700,7 @@ async def _run_review_packages(
     completed_count = max(0, int(initial_completed))
     failed_count = 0
     counters_lock = threading.Lock()
+    terminal_recovery_queue: list[tuple[LLMRequest, LLMResponse, Any]] = []
 
     def validate_response(request: LLMRequest, response: LLMResponse) -> LLMResponse:
         if not response.success:
@@ -678,6 +730,24 @@ async def _run_review_packages(
         nonlocal completed_count, failed_count
         package = list(request.metadata.get("package") or [])
         package_index = int(request.metadata.get("package_index") or 0)
+        can_use_terminal_ai = (
+            is_ai_correctable_response_failure(response.error_type)
+            and len(terminal_recovery_queue) < 8
+        )
+        if (
+            not response.success
+            and not bool(request.metadata.get("terminal_recovery_attempted"))
+            and can_use_terminal_ai
+        ):
+            request.metadata["terminal_recovery_attempted"] = True
+            terminal_recovery_queue.append((request, response, snapshot))
+            _set_review_request_status(task_id, package_index, "retrying", max(1, response.attempts) + 1)
+            _add_log(
+                task_id,
+                "warning",
+                f"第 {package_index}/{len(packages)} 包常规重试已耗尽，进入最后一次 AI 兜底纠错。",
+            )
+            return
         _set_review_request_status(task_id, package_index, "completed" if response.success else "failed", response.attempts)
         _add_log(task_id, "info", f"第 {package_index}/{len(packages)} 包完成，包含 {len(package)} 条，并发 {snapshot.current_concurrency}")
         if bool(config.get("debug_payload_logging", False)):
@@ -809,6 +879,25 @@ async def _run_review_packages(
             f"单次请求硬超时 {max(10, int(provider_settings.timeout_seconds or 90))} 秒；最多请求 3 次。",
         )
         await scheduler.run(requests, on_result=on_result, on_request_started=on_request_started)
+        for request, failed_response, snapshot in terminal_recovery_queue:
+            package_index = int(request.metadata.get("package_index") or 0)
+            recovered_response = await retry_llm_with_corrective_prompt(
+                adapter=adapter,
+                request=request,
+                failed_response=failed_response,
+                response_validator=validate_response,
+                timeout_seconds=min(60, max(10, int(provider_settings.timeout_seconds or 90))),
+            )
+            if recovered_response.success:
+                _add_log(task_id, "warning", f"第 {package_index}/{len(packages)} 包已通过最终 AI 兜底纠错。")
+            else:
+                _add_log(
+                    task_id,
+                    "error",
+                    f"第 {package_index}/{len(packages)} 包最终 AI 兜底仍失败："
+                    f"{recovered_response.error or '响应无效'}",
+                )
+            on_result(request, recovered_response, snapshot)
     finally:
         await adapter.close()
     return requested_count, completed_count, failed_count
@@ -914,6 +1003,10 @@ def _save_review_results_bulk(
     now = utc_now()
     with get_connection() as conn:
         conn.executemany(
+            "DELETE FROM review_results WHERE task_id = ? AND item_id = ? AND status = 'failed'",
+            [(task_id, item["id"]) for item, _result in pairs],
+        )
+        conn.executemany(
             """
             INSERT INTO review_results (
                 id, task_id, item_id, cache_key, status, has_issue, issue_type,
@@ -947,6 +1040,10 @@ def _save_review_errors_bulk(task_id: str, package: list[dict[str, Any]], messag
         return
     now = utc_now()
     with get_connection() as conn:
+        conn.executemany(
+            "DELETE FROM review_results WHERE task_id = ? AND item_id = ? AND status = 'failed'",
+            [(task_id, item["id"]) for item in package],
+        )
         conn.executemany(
             """
             INSERT INTO review_results (
@@ -1245,6 +1342,34 @@ def _update_task(task_id: str, **fields: Any) -> None:
         conn.execute(f"UPDATE review_tasks SET {assignments} WHERE id = ?", values)
 
 
+def _get_completed_review_item_ids(task_id: str) -> set[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT item_id
+            FROM review_results
+            WHERE task_id = ? AND status IN ('completed', 'cached', 'skipped_ai')
+            """,
+            (task_id,),
+        ).fetchall()
+    return {str(row["item_id"] or "") for row in rows if str(row["item_id"] or "").strip()}
+
+
+def _get_recent_review_log_messages(task_id: str, limit: int = 6) -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT message
+            FROM review_task_logs
+            WHERE task_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (task_id, max(1, int(limit))),
+        ).fetchall()
+    return [str(row["message"] or "") for row in reversed(rows)]
+
+
 def _replace_review_request_states(task_id: str, packages: list[list[dict[str, Any]]]) -> None:
     now = utc_now()
     with get_connection() as conn:
@@ -1389,6 +1514,7 @@ def _task_to_dict(row: Any) -> dict[str, Any]:
     status_label_map = {
         "pending": "等待开始",
         "running": "审校中",
+        "recovering": "AI 终止兜底",
         "completed": "已完成",
         "completed_with_errors": "已完成，有失败",
         "failed": "失败",
@@ -1398,6 +1524,8 @@ def _task_to_dict(row: Any) -> dict[str, Any]:
         message = f"已处理 {completed_count}/{total_count}"
     elif status == "running":
         message = f"正在审校 {completed_count}/{total_count}"
+    elif status == "recovering":
+        message = "常规恢复已耗尽，正在进行最后一次 AI 兜底"
     elif status == "failed":
         message = "审校失败"
     else:

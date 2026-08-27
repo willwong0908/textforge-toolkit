@@ -15,6 +15,7 @@ from .constants import FAILURE_SHEET, NONTRANS_REGEX_SHEET, REVIEW_SHEET, TERM_L
 from .logging_utils import configure_file_logger, reset_file_logger
 from .models import AppSettings, RuntimeTaskState, TaskInput
 from .pipeline import TaskCancelledError, TermExtractionService
+from .recovery_supervisor import TerminalFailureContext, request_terminal_recovery_sync
 from .storage import AppPaths, RuntimeCacheStore, SettingsStore, get_app_paths
 from .telemetry import infer_model_tier, track_event
 
@@ -262,10 +263,22 @@ class ExtractionTaskFacade:
                 self._logs.append(str(exc))
         except Exception as exc:
             self.logger.exception("\u4efb\u52a1\u6267\u884c\u5931\u8d25")
+            output_file = self._attempt_terminal_ai_recovery(service, exc)
             with self._lock:
-                self._last_error = str(exc)
-                self._logs.append(str(exc))
-                _track_text_preprocess_finish(self._active_telemetry_context, success=False)
+                if output_file:
+                    self._output_file = output_file
+                    self._last_error = ""
+                    _track_text_preprocess_finish(self._active_telemetry_context, success=True)
+                else:
+                    self._last_error = self._last_error or str(exc)
+                    self._logs.append(self._last_error)
+                    self._last_progress = {
+                        **dict(self._last_progress or {}),
+                        "stage": "FAILED",
+                        "stage_label": "失败",
+                        "message": self._last_error,
+                    }
+                    _track_text_preprocess_finish(self._active_telemetry_context, success=False)
         else:
             with self._lock:
                 self._output_file = output_file
@@ -273,6 +286,74 @@ class ExtractionTaskFacade:
         finally:
             with self._lock:
                 self._is_running = False
+
+    def _attempt_terminal_ai_recovery(self, service: TermExtractionService, exc: Exception) -> str:
+        if self._stop_event.is_set():
+            return ""
+        runtime = self.runtime_store.load()
+        if runtime is not None:
+            runtime.last_error = str(exc)
+            runtime.stats["terminal_ai_recovery_count"] = int(
+                runtime.stats.get("terminal_ai_recovery_count", 0) or 0
+            ) + 1
+            self.runtime_store.save(runtime)
+        with self._lock:
+            self._last_progress = {
+                **dict(self._last_progress or {}),
+                "stage": "AI_RECOVERY",
+                "stage_label": "AI 终止兜底",
+                "message": "常规恢复已耗尽，Recovery Agent 正在判断是否从断点继续。",
+            }
+            self._logs.append("任务即将终止，正在启动最后一次 AI 兜底。")
+        stats = dict(runtime.stats if runtime else {})
+        completed = int(stats.get("progress_current", 0) or 0)
+        total = int(stats.get("progress_total", 0) or 0)
+        decision = request_terminal_recovery_sync(
+            TerminalFailureContext(
+                workflow="text_preprocessing",
+                task_id=str(runtime.task_id if runtime else "text-preprocess"),
+                phase=str(runtime.stage if runtime else "unknown"),
+                error_type=type(exc).__name__,
+                message=str(exc),
+                has_checkpoint=runtime is not None,
+                completed_units=completed,
+                remaining_units=max(0, total - completed),
+                metadata={
+                    "resume_requested": True,
+                    "recent_events": [str(item or "")[-500:] for item in self._logs[-6:]],
+                },
+            ),
+            allowed_actions=("resume_from_checkpoint", "abort"),
+        )
+        if decision.error:
+            with self._lock:
+                self._logs.append(f"AI 兜底未执行：{decision.error}")
+            return ""
+        with self._lock:
+            self._logs.append(f"Recovery Agent 决策：{decision.action}；{decision.reason or '未提供说明'}")
+        if decision.action != "resume_from_checkpoint" or runtime is None:
+            return ""
+        try:
+            with self._lock:
+                self._last_progress = {
+                    **dict(self._last_progress or {}),
+                    "stage": "AI_RECOVERY",
+                    "stage_label": "AI 终止兜底",
+                    "message": "Recovery Agent 已批准，正在从最近检查点恢复。",
+                }
+                self._logs.append("AI 兜底已批准从检查点恢复；该动作最多执行一次。")
+            output_file = asyncio.run(service.run(None, resume=True))
+        except TaskCancelledError:
+            raise
+        except Exception as recovery_exc:
+            self.logger.exception("AI 兜底恢复失败")
+            with self._lock:
+                self._logs.append(f"AI 兜底恢复仍然失败：{type(recovery_exc).__name__}: {recovery_exc}")
+                self._last_error = str(recovery_exc)
+            return ""
+        with self._lock:
+            self._logs.append("AI 兜底恢复成功，任务已继续完成。")
+        return str(output_file or "")
 
     def _append_log(self, message: str) -> None:
         with self._lock:

@@ -175,7 +175,10 @@ def search_excel_rows(folder_path: str, query: str, limit: int = 300) -> Dict[st
 
 
 def copy_cell_style(source_cell, target_cell) -> None:
-    if source_cell is None or not source_cell.has_style:
+    # Read-only worksheets emit EmptyCell objects for blank positions.  They
+    # carry a value but do not expose style attributes, so treating them as
+    # an unstyled cell keeps merges with formatting enabled resilient.
+    if source_cell is None or not bool(getattr(source_cell, "has_style", False)):
         return
     if source_cell.fill:
         target_cell.fill = copy(source_cell.fill)

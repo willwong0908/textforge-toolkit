@@ -332,6 +332,7 @@ STAGE_LABELS = {
     "REVIEWING_CANDIDATES": "术语校验",
     "AGGREGATING_TERMS": "整理结果",
     "EXPORTING": "导出结果",
+    "AI_RECOVERY": "AI 终止兜底",
     "COMPLETED": "已完成",
     "CANCELLED": "已停止",
     "FAILED": "失败",
