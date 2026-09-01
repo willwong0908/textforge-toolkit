@@ -5,6 +5,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -30,6 +31,29 @@ def _term_table_bytes(*, target: str = "哎呀讨厌", include_note: bool = True
     output = BytesIO()
     workbook.save(output)
     workbook.close()
+    return output.getvalue()
+
+
+def _exported_term_table_with_stale_dimension() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet1"
+    sheet.append([
+        "Entry_ID", "Entry_Created", "Entry_Creator", "Japanese", "Term_Example",
+        "Chinese_PRC", "Term_Example",
+    ])
+    sheet.append([1, "9/1/2026 5:00:00 PM", "tester", "スイートビンゴ", 11, "甜心宾果", 13])
+    source = BytesIO()
+    workbook.save(source)
+    workbook.close()
+
+    output = BytesIO()
+    with ZipFile(BytesIO(source.getvalue()), "r") as source_zip, ZipFile(output, "w", ZIP_DEFLATED) as output_zip:
+        for info in source_zip.infolist():
+            payload = source_zip.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                payload = payload.replace(b'<dimension ref="A1:G2"', b'<dimension ref="A1"', 1)
+            output_zip.writestr(info, payload)
     return output.getvalue()
 
 
@@ -115,6 +139,19 @@ class ReviewTermBaseTests(unittest.TestCase):
         pairs, _ = term_base_service.match_terms(term_base["id"], "日语", "简体中文", "あらやだ")
         self.assertEqual(pairs[0]["source"], "あらやだ")
         self.assertNotIn("entry_note", pairs[0])
+
+    def test_stale_worksheet_dimension_and_auxiliary_columns_are_supported(self) -> None:
+        term_base = term_base_service.upload_term_base(
+            "exported_tb.xlsx", _exported_term_table_with_stale_dimension()
+        )
+        self.assertEqual(term_base["entry_count"], 1)
+        self.assertEqual(term_base["languages"], ["Japanese", "Chinese_PRC"])
+
+        pairs, metadata = term_base_service.match_terms(
+            term_base["id"], "日语", "简体中文", "スイートビンゴ"
+        )
+        self.assertEqual(metadata["status"], "matched")
+        self.assertEqual(pairs, [{"source": "スイートビンゴ", "targets": ["甜心宾果"]}])
 
 
 if __name__ == "__main__":

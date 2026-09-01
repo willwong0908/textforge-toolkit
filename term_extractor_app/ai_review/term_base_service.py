@@ -24,6 +24,7 @@ METADATA_HEADERS = {
     "entry_subject": "entry_subject",
     "entry_note": "entry_note",
 }
+AUXILIARY_HEADER_PREFIXES = ("entry_", "term_")
 
 # UI language names, locale codes, and terminology-table headers all resolve to
 # an exact language column. Generic languages prefer the generic column and only
@@ -270,6 +271,11 @@ def _parse_term_table_workbook(data: bytes) -> dict[str, Any]:
         raise TermBaseError(f"无法读取术语表：{exc}") from exc
     try:
         sheet = workbook.worksheets[0]
+        # Some third-party terminology exports contain valid cells beyond A1 but
+        # declare a stale worksheet dimension such as ``A1``.  Read-only
+        # openpyxl trusts that metadata unless the dimensions are reset, which
+        # would otherwise hide every language column from the importer.
+        sheet.reset_dimensions()
         rows = sheet.iter_rows(values_only=True)
         raw_headers = next(rows, None)
         if not raw_headers:
@@ -281,7 +287,7 @@ def _parse_term_table_workbook(data: bytes) -> dict[str, Any]:
         language_indexes: dict[str, list[int]] = {}
         languages: list[str] = []
         for index, header in enumerate(headers):
-            if not header or header_meta[index]:
+            if not header or header_meta[index] or _is_auxiliary_header(header):
                 continue
             if header not in language_indexes:
                 language_indexes[header] = []
@@ -388,6 +394,11 @@ def _term_base_to_dict(row: Any) -> dict[str, Any]:
 def _metadata_header(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
     return METADATA_HEADERS.get(normalized, "")
+
+
+def _is_auxiliary_header(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
+    return normalized.startswith(AUXILIARY_HEADER_PREFIXES)
 
 
 def _normalize_language_key(value: str) -> str:
