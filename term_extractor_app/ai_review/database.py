@@ -238,6 +238,7 @@ def init_db() -> None:
                 title_custom INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'draft',
                 prompt_template_id TEXT,
+                term_base_id TEXT,
                 source_language TEXT NOT NULL DEFAULT 'auto',
                 target_languages_json TEXT NOT NULL DEFAULT '["auto"]',
                 auto_start INTEGER NOT NULL DEFAULT 0,
@@ -245,6 +246,39 @@ def init_db() -> None:
                 error_message TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_term_bases (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                stored_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                sheet_name TEXT NOT NULL DEFAULT '',
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                languages_json TEXT NOT NULL DEFAULT '[]',
+                has_entry_note INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_term_entries (
+                id TEXT PRIMARY KEY,
+                term_base_id TEXT NOT NULL,
+                row_number INTEGER NOT NULL,
+                entry_id TEXT NOT NULL DEFAULT '',
+                entry_subject TEXT NOT NULL DEFAULT '',
+                entry_note TEXT NOT NULL DEFAULT '',
+                terms_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(term_base_id) REFERENCES review_term_bases(id)
             )
             """
         )
@@ -396,6 +430,8 @@ def init_db() -> None:
         }
         if "title_custom" not in session_columns:
             conn.execute("ALTER TABLE review_sessions ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0")
+        if "term_base_id" not in session_columns:
+            conn.execute("ALTER TABLE review_sessions ADD COLUMN term_base_id TEXT")
         attachment_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_attachments)").fetchall()
@@ -442,6 +478,9 @@ def init_db() -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_review_events_session ON review_session_events(session_id, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_term_entries_base ON review_term_entries(term_base_id, row_number)"
         )
 
 

@@ -12,6 +12,7 @@ BASE_DIR = APP_DIR
 DATA_DIR = APP_PATHS.output_dir / "ai_review" / "data"
 UPLOADS_DIR = APP_PATHS.output_dir / "ai_review" / "uploads"
 OUTPUTS_DIR = APP_PATHS.output_dir / "ai_review" / "outputs"
+TERM_BASES_DIR = APP_PATHS.output_dir / "ai_review" / "term_bases"
 STATIC_DIR = APP_DIR / "static"
 DB_PATH = DATA_DIR / "app.sqlite3"
 
@@ -23,5 +24,5 @@ SUPPORTED_XLIFF_EXTENSIONS = {".xlf", ".xliff"}
 
 
 def ensure_directories() -> None:
-    for directory in (DATA_DIR, UPLOADS_DIR, OUTPUTS_DIR):
+    for directory in (DATA_DIR, UPLOADS_DIR, OUTPUTS_DIR, TERM_BASES_DIR):
         directory.mkdir(parents=True, exist_ok=True)

@@ -16,6 +16,7 @@ from .output_service import generate_review_excel
 from .prompt_service import get_prompt_template
 from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings
 from .session_store import emit_event
+from .term_base_service import get_term_base, match_terms
 from ..models import LLMRequest, LLMResponse
 from ..logging_utils import LOGGER_NAME, configure_file_logger
 from ..providers import ProviderRegistry
@@ -71,6 +72,14 @@ DEFAULT_DIRECTIONAL_USER_PROMPT = """请按照 review_types 中指定的审校�
 8. 不要返回 review_types 中不存在的类型。
 9. 不要省略任何已启用的审校类型。"""
 
+TERM_REVIEW_PLACEHOLDER = "{term_review}"
+TERM_REVIEW_INSTRUCTION = (
+    "术语表审校规则：如果 item 包含 term_pairs，请逐项核对译文是否正确使用对应目标术语。"
+    "source 是在原文中命中的源术语，targets 是允许使用的目标术语，entry_note 是可选备注。"
+    "备注仅作为语境参考；若译文未采用合适目标术语或用法与备注冲突，应判定为术语问题并给出完整修改后译文。"
+    "不要把未命中的术语应用到其他条目。"
+)
+
 
 class ReviewTaskError(Exception):
     pass
@@ -87,6 +96,7 @@ def create_review_task(
     enable_forbidden_check: bool = False,
     forbidden_template_id: str | None = None,
     session_id: str | None = None,
+    term_base_id: str | None = None,
 ) -> str:
     if mode == "directional":
         raise ReviewTaskError("定向审校已移除，请使用提示词模板配置审校规则")
@@ -110,6 +120,10 @@ def create_review_task(
     if enable_forbidden_check:
         forbidden_template = get_forbidden_template(forbidden_template_id)
         forbidden_words = parse_forbidden_words(forbidden_template["words_text"])
+
+    term_base = get_term_base(term_base_id)
+    if term_base_id and not term_base:
+        raise ReviewTaskError("所选术语表不存在，请重新选择")
 
     task_id = uuid.uuid4().hex
     now = utc_now()
@@ -178,6 +192,9 @@ def create_review_task(
             "reasoning_effort": str(settings.get("reasoning_effort") or "low"),
             "debug_payload_logging": bool(settings.get("debug_payload_logging", False)),
             "session_id": str(session_id or ""),
+            "term_base_id": str(term_base_id or ""),
+            "term_base_name": str((term_base or {}).get("filename") or ""),
+            "term_base_hash": str((term_base or {}).get("file_hash") or ""),
         }
     with get_connection() as conn:
         conn.execute(
@@ -540,11 +557,40 @@ def _run_review_task_impl(task_id: str) -> None:
 
     if enable_ai_review:
         model = config["model"]
+        term_base_id = str(config.get("term_base_id") or "")
+        term_match_count = 0
+        term_language_warning: dict[str, Any] | None = None
+        if term_base_id:
+            for item in items:
+                term_pairs, match_meta = match_terms(
+                    term_base_id,
+                    str(config.get("source_language") or ""),
+                    str(config.get("target_language") or ""),
+                    str(item.get("source_text") or ""),
+                )
+                if term_pairs:
+                    item["term_pairs"] = term_pairs
+                    term_match_count += len(term_pairs)
+                if match_meta.get("status") == "language_unmapped":
+                    term_language_warning = match_meta
+            if term_language_warning:
+                _add_log(
+                    task_id,
+                    "warning",
+                    "术语表未找到当前源语种或目标语种列，本任务将继续执行但不应用术语表。",
+                )
+            else:
+                _add_log(
+                    task_id,
+                    "info",
+                    f"术语表 {config.get('term_base_name') or term_base_id} 已匹配 {term_match_count} 个术语条目。",
+                )
         prompt_signature = _prompt_signature(
             config["system_prompt"],
             config["user_prompt"],
             config.get("source_language", ""),
             config.get("target_language", ""),
+            str(config.get("term_base_hash") or ""),
         )
         directional_signature = _directional_signature(config)
         enable_thinking = bool(config.get("enable_thinking", False))
@@ -558,6 +604,7 @@ def _run_review_task_impl(task_id: str) -> None:
                 item["source_text"],
                 item["target_text"],
                 _item_info(item),
+                _item_term_pairs(item),
                 model,
                 prompt_signature,
                 directional_signature,
@@ -672,6 +719,7 @@ async def _run_review_packages(
             config,
             json.dumps(payload, ensure_ascii=False),
             any(_item_info(item) for item in package),
+            any(_item_term_pairs(item) for item in package),
         )
         metadata = {
             "enable_thinking": bool(config.get("enable_thinking", False)),
@@ -784,6 +832,7 @@ async def _run_review_packages(
                     config["user_prompt"],
                     str(config.get("source_language") or ""),
                     str(config.get("target_language") or ""),
+                    str(config.get("term_base_hash") or ""),
                 ),
                 directional_signature=_directional_signature(config),
             )
@@ -919,7 +968,7 @@ def _build_packages(
     current_chars = 0
 
     for item in items:
-        item_chars = len(item["source_text"] or "") + len(item["target_text"] or "")
+        item_chars = _item_character_cost(item)
         if item_chars > max_chars:
             if current:
                 packages.append(current)
@@ -937,6 +986,19 @@ def _build_packages(
     if current:
         packages.append(current)
     return packages
+
+
+def _item_character_cost(item: dict[str, Any]) -> int:
+    """Count review content while keeping the existing text-budget semantics."""
+    total = len(str(item.get("source_text") or "")) + len(str(item.get("target_text") or ""))
+    total += sum(
+        len(str(info.get("category") or "")) + len(str(info.get("value") or ""))
+        for info in _item_info(item)
+    )
+    for pair in _item_term_pairs(item):
+        total += len(str(pair.get("source") or "")) + len(str(pair.get("entry_note") or ""))
+        total += sum(len(str(value or "")) for value in pair.get("targets") or [])
+    return total
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:
@@ -1155,10 +1217,20 @@ def _payload_item(item: dict[str, Any]) -> dict[str, Any]:
     info = _item_info(item)
     if info:
         payload["info"] = info
+    term_pairs = _item_term_pairs(item)
+    if term_pairs:
+        payload["term_pairs"] = term_pairs
     return payload
 
 
-def _build_user_prompt(config: dict[str, Any], text: str, has_info: bool) -> str:
+def _item_term_pairs(item: dict[str, Any]) -> list[dict[str, Any]]:
+    pairs = item.get("term_pairs") or []
+    return [pair for pair in pairs if isinstance(pair, dict)] if isinstance(pairs, list) else []
+
+
+def _build_user_prompt(
+    config: dict[str, Any], text: str, has_info: bool, has_term_pairs: bool = False
+) -> str:
     prefixes = []
     source_language = str(config.get("source_language") or "").strip()
     target_language = str(config.get("target_language") or "").strip()
@@ -1175,7 +1247,13 @@ def _build_user_prompt(config: dict[str, Any], text: str, has_info: bool) -> str
             "如果 item 包含 info 字段，请把 info 作为参考信息。"
             "info 中 category 是信息类别，value 是信息内容；没有 info 的条目不要假设存在参考信息。"
         )
-    prompt = config["user_prompt"].replace("{text}", text)
+    term_instruction = TERM_REVIEW_INSTRUCTION if has_term_pairs else ""
+    template = str(config["user_prompt"])
+    had_placeholder = TERM_REVIEW_PLACEHOLDER in template
+    template = template.replace(TERM_REVIEW_PLACEHOLDER, term_instruction)
+    prompt = template.replace("{text}", text)
+    if term_instruction and not had_placeholder:
+        prefixes.append(term_instruction)
     return "\n".join([*prefixes, prompt]) if prefixes else prompt
 
 
@@ -1200,6 +1278,7 @@ def _cache_key(
     source: str,
     target: str,
     info: list[dict[str, str]],
+    term_pairs: list[dict[str, Any]],
     model: str,
     prompt_signature: str,
     directional_signature: str,
@@ -1210,6 +1289,7 @@ def _cache_key(
             "source": source,
             "target": target,
             "info": info,
+            "term_pairs": term_pairs,
             "model": model,
             "prompt_signature": prompt_signature,
             "directional_signature": directional_signature,
@@ -1219,13 +1299,20 @@ def _cache_key(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _prompt_signature(system_prompt: str, user_prompt: str, source_language: str, target_language: str) -> str:
+def _prompt_signature(
+    system_prompt: str,
+    user_prompt: str,
+    source_language: str,
+    target_language: str,
+    term_base_hash: str = "",
+) -> str:
     raw = dumps_json(
         {
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "source_language": source_language,
             "target_language": target_language,
+            "term_base_hash": term_base_hash,
         }
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

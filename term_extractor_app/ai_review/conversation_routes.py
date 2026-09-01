@@ -30,6 +30,7 @@ from .excel_mapping_service import get_excel_mapping_preset
 from .readers import ReaderError, build_default_registry
 from .workflow_service import get_session_task_results, start_session_review
 from .workspace_service import submit_workspace_inspection
+from .term_base_service import get_term_base
 from ..telemetry import track_event
 
 
@@ -39,6 +40,7 @@ router = APIRouter(prefix="/api/ai-review/conversations", tags=["ai-review-conve
 class SessionCreatePayload(BaseModel):
     title: str = "新审校"
     prompt_template_id: str | None = None
+    term_base_id: str | None = None
     source_language: str = "auto"
     target_languages: list[str] = Field(default_factory=lambda: ["auto"])
     auto_start: bool = False
@@ -47,6 +49,7 @@ class SessionCreatePayload(BaseModel):
 class SessionMessagePayload(BaseModel):
     text: str = ""
     prompt_template_id: str | None = None
+    term_base_id: str | None = None
     source_language: str = "auto"
     target_languages: list[str] = Field(default_factory=lambda: ["auto"])
     auto_start: bool | None = None
@@ -60,6 +63,7 @@ class SessionUpdatePayload(BaseModel):
     title: str | None = None
     auto_start: bool | None = None
     prompt_template_id: str | None = None
+    term_base_id: str | None = None
     source_language: str | None = None
     target_languages: list[str] | None = None
 
@@ -112,6 +116,8 @@ def conversations() -> dict[str, Any]:
 
 @router.post("")
 def create_conversation(payload: SessionCreatePayload) -> dict[str, Any]:
+    if payload.term_base_id and not get_term_base(payload.term_base_id):
+        raise HTTPException(status_code=400, detail="术语表不存在")
     return {"session": create_session(**payload.model_dump())}
 
 
@@ -136,6 +142,11 @@ def update_conversation(session_id: str, payload: SessionUpdatePayload) -> dict[
         updates["auto_start"] = bool(payload.auto_start)
     if payload.prompt_template_id is not None:
         updates["prompt_template_id"] = payload.prompt_template_id.strip() or None
+    if "term_base_id" in payload.model_fields_set:
+        term_base_id = str(payload.term_base_id or "").strip() or None
+        if term_base_id and not get_term_base(term_base_id):
+            raise HTTPException(status_code=400, detail="术语表不存在")
+        updates["term_base_id"] = term_base_id
     if payload.source_language is not None:
         updates["source_language"] = payload.source_language.strip() or "auto"
     if payload.target_languages is not None:
@@ -276,6 +287,11 @@ def send_message(session_id: str, payload: SessionMessagePayload) -> dict[str, A
         "source_language": payload.source_language or "auto",
         "target_languages_json": payload.target_languages or ["auto"],
     }
+    if "term_base_id" in payload.model_fields_set:
+        term_base_id = str(payload.term_base_id or "").strip() or None
+        if term_base_id and not get_term_base(term_base_id):
+            raise HTTPException(status_code=400, detail="术语表不存在")
+        update_fields["term_base_id"] = term_base_id
     if payload.auto_start is not None:
         update_fields["auto_start"] = payload.auto_start
     update_session(session_id, **update_fields)

@@ -32,6 +32,7 @@ if __package__:
     from .ai_review.config import OUTPUTS_DIR as AI_REVIEW_OUTPUTS_DIR
     from .ai_review.database import init_db as init_ai_review_db
     from .ai_review.conversation_routes import router as ai_review_conversation_router
+    from .ai_review.term_base_routes import router as ai_review_term_base_router
     from .ai_review.directional_service import (
         delete_directional_template,
         get_directional_template,
@@ -136,6 +137,7 @@ else:
     from term_extractor_app.ai_review.config import OUTPUTS_DIR as AI_REVIEW_OUTPUTS_DIR
     from term_extractor_app.ai_review.database import init_db as init_ai_review_db
     from term_extractor_app.ai_review.conversation_routes import router as ai_review_conversation_router
+    from term_extractor_app.ai_review.term_base_routes import router as ai_review_term_base_router
     from term_extractor_app.ai_review.directional_service import (
         delete_directional_template,
         get_directional_template,
@@ -1007,6 +1009,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
     init_ai_review_db()
     recover_interrupted_review_tasks()
     app.include_router(ai_review_conversation_router)
+    app.include_router(ai_review_term_base_router)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -2927,8 +2930,10 @@ INDEX_HTML = """<!doctype html>
                   <button id="reviewPromptChip" class="composer-chip" type="button">提示词</button>
                   <button id="reviewSourceLanguageChip" class="composer-chip" type="button">源语言：自动</button>
                   <button id="reviewTargetLanguageChip" class="composer-chip" type="button">目标语言：自动</button>
+                  <button id="reviewTermBaseChip" class="composer-chip review-term-base-chip" type="button" title="选择术语表">术语表</button>
                   <button id="reviewUploadChip" class="composer-chip" type="button">＋ 文件</button>
                   <input id="reviewConversationFileInput" type="file" accept=".xlsx,.xlsm,.xlf,.xliff,.csv,.tsv,.txt,.md,.docx,.pptx,.pdf,.json,.xml" multiple hidden />
+                  <input id="reviewTermBaseFileInput" type="file" accept=".xlsx,.xlsm" hidden />
                 </div>
                 <button id="sendReviewConversationButton" class="primary review-send-button" type="button">发送</button>
               </div>
@@ -2942,6 +2947,15 @@ INDEX_HTML = """<!doctype html>
                   <span>⌕</span><input id="reviewLanguageSearch" type="search" placeholder="搜索语言" autocomplete="off" />
                 </div>
                 <div id="reviewLanguageOptions" class="review-language-options"></div>
+              </div>
+              <div id="reviewTermBasePopover" class="review-term-base-popover hidden" role="menu" aria-label="选择术语表">
+                <button id="uploadReviewTermBaseButton" class="review-term-base-action" type="button" role="menuitem">
+                  <span class="review-term-base-action-icon">＋</span><span><strong>上传术语表</strong><small>支持 .xlsx、.xlsm；自动识别语种列</small></span>
+                </button>
+                <button id="clearReviewTermBaseButton" class="review-term-base-action" type="button" role="menuitem">
+                  <span class="review-term-base-action-icon">∅</span><span><strong>不使用术语表</strong><small>当前会话不进行术语匹配</small></span>
+                </button>
+                <div id="reviewTermBaseOptions" class="review-term-base-options"></div>
               </div>
               <span id="reviewConversationHint" class="hint"></span>
             </div>
@@ -5075,6 +5089,19 @@ dialog.modal::backdrop { background: rgba(20, 31, 48, .38); backdrop-filter: blu
 .review-language-option input { position: absolute; opacity: 0; pointer-events: none; }
 .review-language-check { width: 14px; color: #1769d2; font-weight: 800; visibility: hidden; }
 .review-language-option.selected .review-language-check { visibility: visible; }
+.review-term-base-chip { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-term-base-popover { position: absolute; z-index: 62; bottom: 56px; left: 14px; width: min(410px, calc(100% - 28px)); max-height: 390px; overflow: hidden auto; padding: 7px; border: 1px solid #d9e1ea; border-radius: 14px; background: #fff; box-shadow: 0 18px 50px rgba(29,43,68,.18); }
+.review-term-base-action, .review-term-base-option { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 9px; width: 100%; min-height: 48px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: #26354a; text-align: left; }
+.review-term-base-action:hover, .review-term-base-option:hover { background: #f3f6fa; }
+.review-term-base-action-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #e8f0fe; color: #1769d2; font-weight: 800; }
+.review-term-base-action > span:nth-child(2), .review-term-base-option-copy { display: grid; min-width: 0; gap: 2px; }
+.review-term-base-action strong, .review-term-base-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.review-term-base-action small, .review-term-base-option small { overflow: hidden; color: #6c788a; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.review-term-base-options { margin-top: 5px; padding-top: 5px; border-top: 1px solid #e4e9ef; }
+.review-term-base-option.selected { background: #e8f0fe; color: #1769d2; }
+.review-term-base-option-check { color: #1f6f68; font-weight: 850; }
+.review-term-base-delete { width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #8b97a7; }
+.review-term-base-delete:hover { background: rgba(190,44,44,.09); color: var(--danger); }
 .danger-text { color: var(--danger); }
 .compact-actions { align-items: center; }
 @media (max-width: 980px) {
@@ -5673,6 +5700,15 @@ dialog.modal::backdrop, .dialog::backdrop { background: rgba(3,8,17,.72); backdr
 .review-language-option:hover { background: rgba(93,141,255,.14); }
 .review-language-option.selected { background: rgba(93,141,255,.20); color: #eaf1ff; }
 .review-language-check { color: #83e4d2; }
+.review-term-base-popover { border-color: rgba(122,154,208,.46); border-radius: var(--radius-md); background: rgba(14,26,47,.98); color: #edf3ff; box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 20px 48px rgba(0,0,0,.44); backdrop-filter: blur(20px); }
+.review-term-base-action, .review-term-base-option { color: #c8d5e8; }
+.review-term-base-action:hover, .review-term-base-option:hover { background: rgba(93,141,255,.14); }
+.review-term-base-action-icon { background: rgba(93,141,255,.18); color: #bcd0ff; }
+.review-term-base-action small, .review-term-base-option small { color: #93a7c1; }
+.review-term-base-options { border-top-color: rgba(104,137,188,.26); }
+.review-term-base-option.selected { background: rgba(93,141,255,.20); color: #eaf1ff; }
+.review-term-base-option-check { color: #83e4d2; }
+.review-term-base-delete { color: #8296b0; }
 @media (max-width: 1120px) {
   .content { padding: 30px 28px 46px; }
   .tool-guide-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -6213,6 +6249,8 @@ let reviewConversationState = {
   sourceLanguage: "auto",
   targetLanguages: ["auto"],
   promptTemplateId: "",
+  termBaseId: "",
+  termBases: [],
   composerSaveQueue: Promise.resolve(),
   languageMode: "source",
   activeTarget: "",
@@ -6233,6 +6271,37 @@ const reviewLanguages = [
   "意大利语", "俄语", "阿拉伯语", "泰语", "越南语", "印尼语", "土耳其语", "波兰语", "荷兰语", "瑞典语",
   "挪威语", "丹麦语", "芬兰语", "捷克语", "匈牙利语", "罗马尼亚语", "希腊语", "希伯来语", "乌克兰语",
 ];
+const reviewTermBaseLanguageLabels = {
+  English: "英语",
+  English_United_Kingdom: "英语（英国）",
+  French: "法语",
+  German: "德语",
+  Italian: "意大利语",
+  Japanese: "日语",
+  Korean: "韩语",
+  Spanish: "西班牙语",
+  Portuguese: "葡萄牙语",
+  Russian: "俄语",
+  Arabic: "阿拉伯语",
+  Thai: "泰语",
+  Vietnamese: "越南语",
+  Indonesian: "印尼语",
+  Turkish: "土耳其语",
+  Polish: "波兰语",
+  Dutch: "荷兰语",
+  Swedish: "瑞典语",
+  Norwegian: "挪威语",
+  Danish: "丹麦语",
+  Finnish: "芬兰语",
+  Czech: "捷克语",
+  Hungarian: "匈牙利语",
+  Romanian: "罗马尼亚语",
+  Greek: "希腊语",
+  Hebrew: "希伯来语",
+  Ukrainian: "乌克兰语",
+  Chinese_PRC: "简体中文",
+  Chinese_Taiwan: "繁体中文",
+};
 const TASK_STATUS_BY_PAGE = {
   overviewPage: {
     taskLabel: "文本预处理工具",
@@ -8411,6 +8480,13 @@ async function loadReviewConversations(preferredId = "") {
   if (nextId) await openReviewConversation(nextId);
 }
 
+async function loadReviewTermBases() {
+  const data = await api("/api/ai-review/term-bases");
+  reviewConversationState.termBases = Array.isArray(data.term_bases) ? data.term_bases : [];
+  renderReviewTermBaseOptions();
+  updateReviewComposerChips();
+}
+
 async function createReviewConversation() {
   const promptId = reviewConversationState.promptTemplateId || aiReviewPromptTemplates[0]?.id || null;
   const data = await api("/api/ai-review/conversations", {
@@ -8418,6 +8494,7 @@ async function createReviewConversation() {
     body: JSON.stringify({
       title: "新审校",
       prompt_template_id: promptId,
+      term_base_id: null,
       source_language: "auto",
       target_languages: ["auto"],
       auto_start: false,
@@ -8539,6 +8616,7 @@ function saveReviewConversationComposerSettings() {
     prompt_template_id: reviewConversationState.promptTemplateId || null,
     source_language: reviewConversationState.sourceLanguage || "auto",
     target_languages: [...(reviewConversationState.targetLanguages || ["auto"])],
+    term_base_id: reviewConversationState.termBaseId || null,
   };
   const save = async () => {
     const data = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`, {
@@ -8571,6 +8649,7 @@ async function openReviewConversation(sessionId) {
   reviewConversationState.sourceLanguage = session.source_language || "auto";
   reviewConversationState.targetLanguages = Array.isArray(session.target_languages) && session.target_languages.length ? session.target_languages : ["auto"];
   reviewConversationState.promptTemplateId = session.prompt_template_id || aiReviewPromptTemplates[0]?.id || "";
+  reviewConversationState.termBaseId = session.term_base_id || "";
   reviewConversationState.activeTarget = reviewConversationState.activeTarget || snapshot.task_results?.[0]?.target_language || "";
   renderReviewConversationList();
   renderReviewConversationSnapshot();
@@ -9006,6 +9085,7 @@ async function sendReviewConversationMessage() {
       body: JSON.stringify({
         text,
         prompt_template_id: reviewConversationState.promptTemplateId || null,
+        term_base_id: reviewConversationState.termBaseId || null,
         source_language: reviewConversationState.sourceLanguage,
         target_languages: reviewConversationState.targetLanguages,
         auto_start: $("reviewAutoStart").checked,
@@ -9174,6 +9254,114 @@ function closeReviewLanguagePopover() {
   $("reviewLanguagePopover").classList.add("hidden");
 }
 
+function currentReviewTermBase() {
+  return reviewConversationState.termBases.find((item) => item.id === reviewConversationState.termBaseId) || null;
+}
+
+function reviewTermBaseLanguageLabel(value) {
+  return reviewTermBaseLanguageLabels[value] || String(value || "").replaceAll("_", " ");
+}
+
+function toggleReviewTermBasePopover() {
+  closeReviewLanguagePopover();
+  renderReviewTermBaseOptions();
+  const popover = $("reviewTermBasePopover");
+  popover.classList.toggle("hidden");
+  if (!popover.classList.contains("hidden")) {
+    const anchor = $("reviewTermBaseChip");
+    const composer = $("reviewComposer");
+    const wantedLeft = Math.max(0, anchor.offsetLeft - 6);
+    const maxLeft = Math.max(0, composer.clientWidth - popover.offsetWidth - 14);
+    popover.style.left = `${Math.min(wantedLeft, maxLeft)}px`;
+  }
+}
+
+function closeReviewTermBasePopover() {
+  $("reviewTermBasePopover").classList.add("hidden");
+}
+
+function renderReviewTermBaseOptions() {
+  const container = $("reviewTermBaseOptions");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!reviewConversationState.termBases.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "尚未缓存术语表";
+    container.appendChild(empty);
+    return;
+  }
+  reviewConversationState.termBases.forEach((termBase) => {
+    const row = document.createElement("div");
+    row.className = `review-term-base-option ${termBase.id === reviewConversationState.termBaseId ? "selected" : ""}`.trim();
+    row.setAttribute("role", "menuitem");
+    row.tabIndex = 0;
+    const check = document.createElement("span");
+    check.className = "review-term-base-option-check";
+    check.textContent = termBase.id === reviewConversationState.termBaseId ? "✓" : "";
+    const copy = document.createElement("span");
+    copy.className = "review-term-base-option-copy";
+    const name = document.createElement("strong");
+    name.textContent = termBase.filename || "未命名术语表";
+    const meta = document.createElement("small");
+    const noteLabel = termBase.has_entry_note ? " · 含备注" : "";
+    const languages = (termBase.languages || []).map(reviewTermBaseLanguageLabel);
+    meta.textContent = `${Number(termBase.entry_count || 0)} 条 · ${languages.join(" / ")}${noteLabel}`;
+    copy.append(name, meta);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "review-term-base-delete";
+    remove.title = `删除 ${termBase.filename || "术语表"}`;
+    remove.setAttribute("aria-label", remove.title);
+    remove.textContent = "×";
+    const select = () => selectReviewTermBase(termBase.id).catch(showReviewConversationError);
+    row.addEventListener("click", (event) => {
+      if (!remove.contains(event.target)) select();
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
+    });
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteReviewTermBase(termBase).catch(showReviewConversationError);
+    });
+    row.append(check, copy, remove);
+    container.appendChild(row);
+  });
+}
+
+async function selectReviewTermBase(termBaseId) {
+  reviewConversationState.termBaseId = String(termBaseId || "");
+  updateReviewComposerChips();
+  renderReviewTermBaseOptions();
+  closeReviewTermBasePopover();
+  await saveReviewConversationComposerSettings();
+}
+
+async function uploadReviewTermBase(file) {
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  $("reviewConversationHint").textContent = `正在读取术语表 ${file.name}…`;
+  const data = await api("/api/ai-review/term-bases", { method: "POST", body: form });
+  const termBase = data.term_base || {};
+  await loadReviewTermBases();
+  await selectReviewTermBase(termBase.id || "");
+  $("reviewConversationHint").textContent = `已缓存并选择 ${termBase.filename || file.name}`;
+}
+
+async function deleteReviewTermBase(termBase) {
+  if (!window.confirm(`确定删除术语表“${termBase.filename || "未命名术语表"}”吗？所有引用它的会话将改为不使用术语表。`)) return;
+  await api(`/api/ai-review/term-bases/${encodeURIComponent(termBase.id)}`, { method: "DELETE" });
+  if (reviewConversationState.termBaseId === termBase.id) reviewConversationState.termBaseId = "";
+  await loadReviewTermBases();
+  await refreshCurrentReviewConversation();
+  $("reviewConversationHint").textContent = "术语表已删除";
+}
+
 function renderReviewLanguageOptions() {
   const search = $("reviewLanguageSearch").value.trim().toLowerCase();
   const container = $("reviewLanguageOptions");
@@ -9232,6 +9420,11 @@ function updateReviewComposerChips() {
   $("reviewSourceLanguageChip").textContent = `源语言：${sourceLabel}`;
   const targets = reviewConversationState.targetLanguages.map((value) => value === "auto" ? "自动" : value);
   $("reviewTargetLanguageChip").textContent = `目标语言：${targets.join("、")}`;
+  const termBase = currentReviewTermBase();
+  $("reviewTermBaseChip").textContent = termBase?.filename || "术语表";
+  $("reviewTermBaseChip").title = termBase
+    ? `${termBase.filename} · ${Number(termBase.entry_count || 0)} 条术语`
+    : "选择术语表";
 }
 
 async function openReviewConversationPromptDialog() {
@@ -10810,6 +11003,16 @@ document.querySelectorAll('input[name="reviewAttachmentMappingMode"]').forEach((
   input.addEventListener("change", updateReviewAttachmentMappingControls);
 });
 $("reviewUploadChip").addEventListener("click", () => chooseReviewConversationFiles().catch(showReviewConversationError));
+$("reviewTermBaseChip").addEventListener("click", toggleReviewTermBasePopover);
+$("uploadReviewTermBaseButton").addEventListener("click", () => {
+  closeReviewTermBasePopover();
+  $("reviewTermBaseFileInput").click();
+});
+$("clearReviewTermBaseButton").addEventListener("click", () => selectReviewTermBase("").catch(showReviewConversationError));
+$("reviewTermBaseFileInput").addEventListener("change", () => {
+  const file = $("reviewTermBaseFileInput").files?.[0];
+  uploadReviewTermBase(file).catch(showReviewConversationError).finally(() => ($("reviewTermBaseFileInput").value = ""));
+});
 $("reviewConversationFileInput").addEventListener("change", () => {
   const files = $("reviewConversationFileInput").files;
   uploadReviewConversationFiles(files).catch(showReviewConversationError).finally(() => ($("reviewConversationFileInput").value = ""));
@@ -10845,9 +11048,15 @@ $("reviewLanguageSearch").addEventListener("input", renderReviewLanguageOptions)
 $("closeReviewLanguagePopoverButton").addEventListener("click", closeReviewLanguagePopover);
 document.addEventListener("pointerdown", (event) => {
   const popover = $("reviewLanguagePopover");
-  if (popover.classList.contains("hidden")) return;
-  if (popover.contains(event.target) || $("reviewSourceLanguageChip").contains(event.target) || $("reviewTargetLanguageChip").contains(event.target)) return;
-  closeReviewLanguagePopover();
+  if (!popover.classList.contains("hidden") && !popover.contains(event.target)
+    && !$("reviewSourceLanguageChip").contains(event.target) && !$("reviewTargetLanguageChip").contains(event.target)) {
+    closeReviewLanguagePopover();
+  }
+  const termPopover = $("reviewTermBasePopover");
+  if (!termPopover.classList.contains("hidden") && !termPopover.contains(event.target)
+    && !$("reviewTermBaseChip").contains(event.target)) {
+    closeReviewTermBasePopover();
+  }
 });
 $("promptDialogTemplateSelect").addEventListener("change", async () => {
   const templateId = $("promptDialogTemplateSelect").value;
@@ -11122,7 +11331,7 @@ Promise.all([
   loadBuiltinRules(),
   loadPendingRules(),
   loadAppUpdateInfo(),
-  loadAiReviewPromptTemplates().then(() => loadReviewConversations()),
+  Promise.all([loadAiReviewPromptTemplates(), loadReviewTermBases()]).then(() => loadReviewConversations()),
   loadAiReviewDirectionalTemplates(),
   loadAiReviewForbiddenTemplates(),
 ]).then(refreshStatus).catch((error) => {

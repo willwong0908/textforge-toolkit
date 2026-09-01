@@ -27,10 +27,11 @@ DEFAULT_USER_PROMPT = (
     "6. \u5982\u679c\u6761\u76ee\u5305\u542b info \u5b57\u6bb5\uff0c\u8bf7\u628a info \u4f5c\u4e3a\u53c2\u8003\u4fe1\u606f\uff1b"
     "info \u4e2d category \u662f\u4fe1\u606f\u7c7b\u522b\uff0cvalue \u662f\u4fe1\u606f\u5185\u5bb9\u3002\n"
     "7. \u5982\u679c\u6761\u76ee\u4e0d\u5305\u542b info \u5b57\u6bb5\uff0c\u4e0d\u8981\u5047\u8bbe\u5b58\u5728\u53c2\u8003\u4fe1\u606f\u3002\n\n"
+    "{term_review}\n\n"
     "\u5f85\u5ba1\u6821 JSON\uff1a\n"
     "{text}"
 )
-DEFAULT_USER_PROMPT_MARKER = "\u4e0d\u8981\u56e0\u4e3a\u6807\u7b7e\u793a\u4f8b\u800c\u6269\u5927\u5ba1\u6821\u8303\u56f4"
+DEFAULT_USER_PROMPT_MARKER = "{term_review}"
 
 
 def ensure_default_prompt_template() -> None:

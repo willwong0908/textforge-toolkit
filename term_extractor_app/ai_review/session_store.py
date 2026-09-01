@@ -17,6 +17,7 @@ def create_session(
     *,
     title: str = "新审校",
     prompt_template_id: str | None = None,
+    term_base_id: str | None = None,
     source_language: str = "auto",
     target_languages: list[str] | None = None,
     auto_start: bool = False,
@@ -29,15 +30,16 @@ def create_session(
         conn.execute(
             """
             INSERT INTO review_sessions (
-                id, title, title_custom, status, prompt_template_id, source_language,
+                id, title, title_custom, status, prompt_template_id, term_base_id, source_language,
                 target_languages_json, auto_start, created_at, updated_at
-            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 str(title or "新审校").strip()[:120] or "新审校",
                 0 if str(title or "").strip() in {"", "新审校"} else 1,
                 prompt_template_id,
+                term_base_id,
                 str(source_language or "auto").strip() or "auto",
                 dumps_json(targets),
                 1 if auto_start else 0,
@@ -110,7 +112,7 @@ def get_session_snapshot(session_id: str) -> dict[str, Any] | None:
 
 def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
     allowed = {
-        "title", "title_custom", "status", "prompt_template_id", "source_language", "target_languages_json",
+        "title", "title_custom", "status", "prompt_template_id", "term_base_id", "source_language", "target_languages_json",
         "auto_start", "context_summary", "error_message",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
@@ -701,6 +703,7 @@ def _session_to_dict(row: Any) -> dict[str, Any]:
         "title_custom": bool(row["title_custom"]) if "title_custom" in row.keys() else False,
         "status": row["status"],
         "prompt_template_id": row["prompt_template_id"],
+        "term_base_id": row["term_base_id"] if "term_base_id" in row.keys() else None,
         "source_language": row["source_language"],
         "target_languages": loads_json(row["target_languages_json"], ["auto"]),
         "auto_start": bool(row["auto_start"]),

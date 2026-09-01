@@ -48,6 +48,18 @@ class ReviewWorkflowValidationTests(unittest.TestCase):
         self.assertIn("没有原文", prompt)
         self.assertNotIn("none 原文", prompt)
 
+    def test_term_review_placeholder_is_only_expanded_for_matched_terms(self) -> None:
+        config = {
+            "source_language": "日语",
+            "target_language": "简体中文",
+            "user_prompt": "规则：\n{term_review}\n数据：{text}",
+        }
+        without_terms = _build_user_prompt(config, "{}", False, False)
+        with_terms = _build_user_prompt(config, "{}", False, True)
+        self.assertNotIn("{term_review}", without_terms)
+        self.assertNotIn("术语表审校规则", without_terms)
+        self.assertIn("术语表审校规则", with_terms)
+
     def test_validation_rejects_missing_item(self) -> None:
         package = [_request_item("a"), _request_item("b")]
         with self.assertRaises(ReviewTaskError):

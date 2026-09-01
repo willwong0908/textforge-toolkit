@@ -92,6 +92,7 @@ def start_session_review(session_id: str, run_id: str | None = None) -> list[dic
             enable_ai_review=True,
             enable_forbidden_check=bool(str(template.get("forbidden_words_text") or "").strip()),
             session_id=session_id,
+            term_base_id=session.get("term_base_id"),
         )
         link_task(session_id, language, task_id)
         created.append({"target_language": language, "task_id": task_id})
