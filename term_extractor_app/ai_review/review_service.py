@@ -74,10 +74,10 @@ DEFAULT_DIRECTIONAL_USER_PROMPT = """请按照 review_types 中指定的审校�
 
 TERM_REVIEW_PLACEHOLDER = "{term_review}"
 TERM_REVIEW_INSTRUCTION = (
-    "术语表审校规则：如果 item 包含 term_pairs，请逐项核对译文是否正确使用对应目标术语。"
+    "术语表审校规则：如果请求 JSON 包含 term_pairs，它是当前批次所有条目命中的去重术语集合。"
+    "审校每个 item 时，只核对该 item 原文中实际出现的 source，不要把其他条目命中的术语套用到当前条目。"
     "source 是在原文中命中的源术语，targets 是允许使用的目标术语，entry_note 是可选备注。"
     "备注仅作为语境参考；若译文未采用合适目标术语或用法与备注冲突，应判定为术语问题并给出完整修改后译文。"
-    "不要把未命中的术语应用到其他条目。"
 )
 
 
@@ -707,18 +707,13 @@ async def _run_review_packages(
 
     requests: list[LLMRequest] = []
     for index, package in enumerate(packages, start=1):
-        payload: dict[str, Any] = {"items": [_payload_item(item) for item in package]}
-        if config.get("mode") == "directional":
-            payload["review_types"] = config.get("review_types", [])
-        source_language = str(config.get("source_language") or "").strip()
-        target_language = str(config.get("target_language") or "").strip()
-        if source_language or target_language:
-            payload["language"] = {"source": source_language, "target": target_language}
+        payload = _build_request_payload(package, config)
+        package_term_pairs = list(payload.get("term_pairs") or [])
         user_prompt = _build_user_prompt(
             config,
             json.dumps(payload, ensure_ascii=False),
             any(_item_info(item) for item in package),
-            any(_item_term_pairs(item) for item in package),
+            bool(package_term_pairs),
         )
         metadata = {
             "enable_thinking": bool(config.get("enable_thinking", False)),
@@ -985,22 +980,31 @@ def _build_packages(
     packages: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_chars = 0
+    current_term_keys: set[str] = set()
 
     for item in items:
         item_chars = _item_character_cost(item)
+        item_pairs = _item_term_pairs(item)
+        new_term_chars, new_term_keys = _new_term_pair_cost(item_pairs, current_term_keys)
+        item_chars += new_term_chars
         if item_chars > max_chars:
             if current:
                 packages.append(current)
                 current = []
                 current_chars = 0
+                current_term_keys = set()
             packages.append([item])
             continue
         if current and (current_chars + item_chars > max_chars or len(current) >= max_items):
             packages.append(current)
             current = []
             current_chars = 0
+            current_term_keys = set()
+            new_term_chars, new_term_keys = _new_term_pair_cost(item_pairs, current_term_keys)
+            item_chars = _item_character_cost(item) + new_term_chars
         current.append(item)
         current_chars += item_chars
+        current_term_keys.update(new_term_keys)
 
     if current:
         packages.append(current)
@@ -1008,15 +1012,32 @@ def _build_packages(
 
 
 def _item_character_cost(item: dict[str, Any]) -> int:
-    """Count review content while keeping the existing text-budget semantics."""
+    """Count item-local review content; package-level terms are counted separately."""
     total = len(str(item.get("source_text") or "")) + len(str(item.get("target_text") or ""))
     total += sum(
         len(str(info.get("category") or "")) + len(str(info.get("value") or ""))
         for info in _item_info(item)
     )
-    for pair in _item_term_pairs(item):
-        total += len(str(pair.get("source") or "")) + len(str(pair.get("entry_note") or ""))
-        total += sum(len(str(value or "")) for value in pair.get("targets") or [])
+    return total
+
+
+def _new_term_pair_cost(
+    pairs: list[dict[str, Any]], existing_keys: set[str]
+) -> tuple[int, set[str]]:
+    total = 0
+    new_keys: set[str] = set()
+    for pair in pairs:
+        key = _term_pair_key(pair)
+        if key in existing_keys or key in new_keys:
+            continue
+        new_keys.add(key)
+        total += _term_pair_character_cost(pair)
+    return total, new_keys
+
+
+def _term_pair_character_cost(pair: dict[str, Any]) -> int:
+    total = len(str(pair.get("source") or "")) + len(str(pair.get("entry_note") or ""))
+    total += sum(len(str(value or "")) for value in pair.get("targets") or [])
     return total
 
 
@@ -1231,20 +1252,50 @@ def _item_info(item: dict[str, Any]) -> list[dict[str, str]]:
     return normalized
 
 
+def _build_request_payload(
+    package: list[dict[str, Any]], config: dict[str, Any]
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"items": [_payload_item(item) for item in package]}
+    term_pairs = _package_term_pairs(package)
+    if term_pairs:
+        payload["term_pairs"] = term_pairs
+    if config.get("mode") == "directional":
+        payload["review_types"] = config.get("review_types", [])
+    source_language = str(config.get("source_language") or "").strip()
+    target_language = str(config.get("target_language") or "").strip()
+    if source_language or target_language:
+        payload["language"] = {"source": source_language, "target": target_language}
+    return payload
+
+
 def _payload_item(item: dict[str, Any]) -> dict[str, Any]:
     payload = {"id": item["id"], "source": item["source_text"], "target": item["target_text"]}
     info = _item_info(item)
     if info:
         payload["info"] = info
-    term_pairs = _item_term_pairs(item)
-    if term_pairs:
-        payload["term_pairs"] = term_pairs
     return payload
 
 
 def _item_term_pairs(item: dict[str, Any]) -> list[dict[str, Any]]:
     pairs = item.get("term_pairs") or []
     return [pair for pair in pairs if isinstance(pair, dict)] if isinstance(pairs, list) else []
+
+
+def _package_term_pairs(package: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in package:
+        for pair in _item_term_pairs(item):
+            key = _term_pair_key(pair)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(pair)
+    return pairs
+
+
+def _term_pair_key(pair: dict[str, Any]) -> str:
+    return json.dumps(pair, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _build_user_prompt(

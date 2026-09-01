@@ -7,6 +7,7 @@ from term_extractor_app.ai_review import workflow_service
 from term_extractor_app.ai_review.review_service import (
     ReviewTaskError,
     _build_packages,
+    _build_request_payload,
     _build_user_prompt,
     _format_ai_request_log,
     _format_ai_response_log,
@@ -62,6 +63,37 @@ class ReviewWorkflowValidationTests(unittest.TestCase):
         self.assertNotIn("{term_review}", without_terms)
         self.assertNotIn("术语表审校规则", without_terms)
         self.assertIn("术语表审校规则", with_terms)
+
+    def test_term_pairs_are_deduplicated_once_at_package_level(self) -> None:
+        pairs = [
+            {"source": f"s{index}", "targets": [f"t{index}"]}
+            for index in range(10)
+        ]
+        items = [_request_item("a"), _request_item("b")]
+        for item in items:
+            item["term_pairs"] = list(pairs)
+
+        payload = _build_request_payload(
+            items,
+            {"mode": "normal", "source_language": "日语", "target_language": "简体中文"},
+        )
+
+        self.assertEqual(payload["term_pairs"], pairs)
+        self.assertEqual(len(payload["term_pairs"]), 10)
+        self.assertTrue(all("term_pairs" not in item for item in payload["items"]))
+
+    def test_package_budget_counts_each_unique_term_only_once(self) -> None:
+        pairs = [
+            {"source": f"s{index}", "targets": [f"t{index}"]}
+            for index in range(10)
+        ]
+        items = [_request_item("a"), _request_item("b")]
+        for item in items:
+            item["term_pairs"] = list(pairs)
+
+        packages = _build_packages(items, 70, max_items=20)
+
+        self.assertEqual([len(package) for package in packages], [2])
 
     def test_detailed_request_log_contains_exact_messages_and_term_pairs(self) -> None:
         request = LLMRequest(
