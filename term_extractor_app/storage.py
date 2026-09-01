@@ -214,7 +214,6 @@ def build_default_settings() -> AppSettings:
                 "workspace_enable_thinking": True,
                 "reasoning_effort": "low",
                 "auto_start_after_inspection": False,
-                "debug_payload_logging": False,
             },
             "term_stage_settings": {
                 "single_item_char_limit": 500,
@@ -570,6 +569,7 @@ class SettingsStore:
             settings.input_defaults["term_review_stage_settings"].setdefault(key, legacy_term_stage.get(key, value))
         for key, value in defaults.input_defaults["ai_review_stage_settings"].items():
             settings.input_defaults["ai_review_stage_settings"].setdefault(key, value)
+        settings.input_defaults["ai_review_stage_settings"].pop("debug_payload_logging", None)
         for stage_key, limit_key in (
             ("nontrans_stage_settings", "chunk_char_limit"),
             ("term_recall_stage_settings", "batch_request_char_limit"),

@@ -263,7 +263,6 @@ class SettingsPayload(BaseModel):
     ai_review_batch_char_limit: Optional[int] = None
     ai_review_max_items_per_request: Optional[int] = None
     ai_review_workspace_enable_thinking: Optional[bool] = None
-    ai_review_debug_payload_logging: Optional[bool] = None
     ai_review_reasoning_effort: Optional[str] = None
     nontrans_reasoning_effort: Optional[str] = None
     term_recall_reasoning_effort: Optional[str] = None
@@ -1214,8 +1213,6 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             ai_review["max_items_per_request"] = max(1, int(payload.ai_review_max_items_per_request))
         if payload.ai_review_workspace_enable_thinking is not None:
             ai_review["workspace_enable_thinking"] = bool(payload.ai_review_workspace_enable_thinking)
-        if payload.ai_review_debug_payload_logging is not None:
-            ai_review["debug_payload_logging"] = bool(payload.ai_review_debug_payload_logging)
         if payload.ai_review_reasoning_effort is not None:
             effort = str(payload.ai_review_reasoning_effort or "low").strip().lower()
             ai_review["reasoning_effort"] = effort if effort in {"low", "medium", "high"} else "low"
@@ -3059,7 +3056,6 @@ INDEX_HTML = """<!doctype html>
             </div>
             <div class="grid two">
               <label>思考强度<select id="reviewReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
-              <label class="check-line"><input id="reviewDebugPayloadLogging" type="checkbox" /><span>记录调试请求内容</span></label>
               <label>单包正文预算<input id="reviewAiLimit" type="number" min="200" value="1500" /></label>
               <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="20" /></label>
             </div>
@@ -6379,7 +6375,7 @@ const PAGE_HERO_COPY = {
   diffExcelPage: { title: "Excel差异比对", lede: "对比两个 Excel 文件或目录，查看差异、导出结果并批量标记。" },
   crossExcelPage: { title: "跨Excel搜索与合并", lede: "跨文件搜索整行内容，并按表头合并结果。" },
   aiReviewTaskPage: { title: "审校任务", lede: "导入文件、确认映射、查看预览并启动审校任务。" },
-  aiReviewSettingsPage: { title: "审校设置", lede: "管理 Workflow 参数、阶段深度思考与调试选项。" },
+  aiReviewSettingsPage: { title: "审校设置", lede: "管理审校请求参数与思考强度。" },
   aiReviewForbiddenPage: { title: "禁用词", lede: "单独管理禁用词开关与禁用词模板。" },
 };
 const PAGE_ACCORDION_KEYS = {
@@ -9659,7 +9655,6 @@ async function loadSettings() {
   }
   $("reviewMaxItems").value = aiReview.max_items_per_request || 20;
   $("reviewReasoningEffort").value = normalizeReasoningEffort(aiReview.reasoning_effort === "max" ? "high" : aiReview.reasoning_effort);
-  $("reviewDebugPayloadLogging").checked = Boolean(aiReview.debug_payload_logging);
   $("builtinRegex").checked = nontrans.builtin_regex_enabled !== false;
   $("aiDiscovery").checked = nontrans.ai_discovery_enabled !== false;
   $("aiRegex").checked = nontrans.ai_regex_generation_enabled !== false;
@@ -9735,7 +9730,6 @@ function reviewSettingsPayload() {
   return {
     ai_review_batch_char_limit: Number($("reviewAiLimit").value || 1500),
     ai_review_max_items_per_request: Number($("reviewMaxItems").value || 20),
-    ai_review_debug_payload_logging: $("reviewDebugPayloadLogging").checked,
     ai_review_reasoning_effort: $("reviewReasoningEffort").value || "low",
   };
 }

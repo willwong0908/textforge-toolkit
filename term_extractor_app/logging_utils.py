@@ -13,7 +13,7 @@ LOGGER_NAME = "term_extractor_app"
 def configure_file_logger(paths: Optional[AppPaths] = None, *, with_console: bool = True) -> logging.Logger:
     paths = paths or get_app_paths()
     logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
     target_file = str(paths.log_file)

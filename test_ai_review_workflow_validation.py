@@ -8,9 +8,12 @@ from term_extractor_app.ai_review.review_service import (
     ReviewTaskError,
     _build_packages,
     _build_user_prompt,
+    _format_ai_request_log,
+    _format_ai_response_log,
     _validate_response_items,
 )
 from term_extractor_app.ai_review.output_service import NORMAL_HEADERS
+from term_extractor_app.models import LLMRequest, LLMResponse
 
 
 def _request_item(item_id: str) -> dict[str, str]:
@@ -59,6 +62,56 @@ class ReviewWorkflowValidationTests(unittest.TestCase):
         self.assertNotIn("{term_review}", without_terms)
         self.assertNotIn("术语表审校规则", without_terms)
         self.assertIn("术语表审校规则", with_terms)
+
+    def test_detailed_request_log_contains_exact_messages_and_term_pairs(self) -> None:
+        request = LLMRequest(
+            task_id="task",
+            task_type="candidate_review_batch",
+            prompt="fallback",
+            messages=[
+                {"role": "system", "content": "系统提示词"},
+                {
+                    "role": "user",
+                    "content": '术语表审校规则\n{"term_pairs":[{"source":"勇者","targets":["Hero"]}]}',
+                },
+            ],
+        )
+        log = _format_ai_request_log(
+            package_index=2,
+            package_total=5,
+            attempt=1,
+            model="review-model",
+            request=request,
+        )
+        self.assertIn("AI 请求｜包 2/5｜第 1 次｜模型 review-model", log)
+        self.assertIn("[system]\n系统提示词", log)
+        self.assertIn('"term_pairs"', log)
+        self.assertIn('"勇者"', log)
+
+    def test_detailed_response_log_contains_content_error_and_metadata(self) -> None:
+        response = LLMResponse(
+            task_id="task",
+            task_type="candidate_review_batch",
+            content='{"items":[]}',
+            provider="provider",
+            model="review-model",
+            latency_ms=123,
+            attempts=2,
+            success=False,
+            error="缺少条目",
+            error_type="response_validation",
+            response_metadata={"request_id": "req-1"},
+        )
+        log = _format_ai_response_log(
+            package_index=2,
+            package_total=5,
+            attempt=2,
+            response=response,
+        )
+        self.assertIn("AI 返回｜包 2/5｜第 2 次", log)
+        self.assertIn('{"items":[]}', log)
+        self.assertIn("response_validation", log)
+        self.assertIn('"request_id": "req-1"', log)
 
     def test_validation_rejects_missing_item(self) -> None:
         package = [_request_item("a"), _request_item("b")]

@@ -190,7 +190,6 @@ def create_review_task(
             "max_items_per_request": int(settings.get("max_items_per_request") or 80),
             "enable_thinking": bool(settings.get("enable_thinking", False)),
             "reasoning_effort": str(settings.get("reasoning_effort") or "low"),
-            "debug_payload_logging": bool(settings.get("debug_payload_logging", False)),
             "session_id": str(session_id or ""),
             "term_base_id": str(term_base_id or ""),
             "term_base_name": str((term_base or {}).get("filename") or ""),
@@ -798,19 +797,6 @@ async def _run_review_packages(
             return
         _set_review_request_status(task_id, package_index, "completed" if response.success else "failed", response.attempts)
         _add_log(task_id, "info", f"第 {package_index}/{len(packages)} 包完成，包含 {len(package)} 条，并发 {snapshot.current_concurrency}")
-        if bool(config.get("debug_payload_logging", False)):
-            _add_log(
-                task_id,
-                "debug",
-                _format_ai_request_log(
-                    attempt=response.attempts,
-                    model=model,
-                    system_prompt=config["system_prompt"],
-                    user_prompt=request.prompt,
-                    item_count=len(package),
-                ),
-            )
-            _add_log(task_id, "debug", "AI 返回内容：\n" + str(response.content or ""))
         if response.success:
             parsed_items = _parse_json_object(response.content).get("items", [])
             result_by_id = {str(item.get("id")): item for item in parsed_items if isinstance(item, dict)}
@@ -881,10 +867,12 @@ async def _run_review_packages(
         package_index = int(request.metadata.get("package_index") or 0)
         _set_review_request_status(task_id, package_index, "retrying", next_attempt)
         reason = str(response.error_type or "request_failed")
+        detail = str(response.error or "").strip()
         _add_log(
             task_id,
             "warning",
             f"第 {package_index}/{len(packages)} 包触发重试；原因 {reason}；"
+            f"{('详情 ' + detail + '；') if detail else ''}"
             f"{backoff:.1f} 秒后进行第 {next_attempt} 次请求。",
         )
 
@@ -897,7 +885,38 @@ async def _run_review_packages(
         else:
             _set_review_request_status(task_id, package_index, "submitted", attempt)
             _add_log(task_id, "warning", f"第 {package_index}/{len(packages)} 包响应无效或请求失败，正在进行第 {attempt} 次请求。")
-        return await original_send_prompt(request, attempt=attempt)
+        _add_log(
+            task_id,
+            "debug",
+            _format_ai_request_log(
+                package_index=package_index,
+                package_total=len(packages),
+                attempt=attempt,
+                model=model,
+                request=request,
+            ),
+        )
+        try:
+            response = await original_send_prompt(request, attempt=attempt)
+        except Exception as exc:
+            _add_log(
+                task_id,
+                "debug",
+                f"AI 请求异常｜包 {package_index}/{len(packages)}｜第 {attempt} 次\n"
+                f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        _add_log(
+            task_id,
+            "debug",
+            _format_ai_response_log(
+                package_index=package_index,
+                package_total=len(packages),
+                attempt=attempt,
+                response=response,
+            ),
+        )
+        return response
 
     adapter.send_prompt = logged_send_prompt
 
@@ -1259,19 +1278,53 @@ def _build_user_prompt(
 
 def _format_ai_request_log(
     *,
+    package_index: int,
+    package_total: int,
     attempt: int,
     model: str,
-    system_prompt: str,
-    user_prompt: str,
-    item_count: int,
+    request: LLMRequest,
 ) -> str:
-    return (
-        f"AI 请求 attempt={attempt} model={model} item_count={item_count}\n"
-        "[system]\n"
-        f"{system_prompt}\n"
-        "[user]\n"
-        f"{user_prompt}"
-    )
+    messages = list(request.messages or [])
+    if not messages:
+        messages = [{"role": "user", "content": request.prompt}]
+    sections = [
+        f"AI 请求｜包 {package_index}/{package_total}｜第 {attempt} 次｜模型 {model}"
+    ]
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        content = str(message.get("content") or "")
+        sections.extend((f"[{role}]", content))
+    return "\n".join(sections)
+
+
+def _format_ai_response_log(
+    *,
+    package_index: int,
+    package_total: int,
+    attempt: int,
+    response: LLMResponse,
+) -> str:
+    sections = [
+        f"AI 返回｜包 {package_index}/{package_total}｜第 {attempt} 次｜"
+        f"成功 {str(bool(response.success)).lower()}｜耗时 {int(response.latency_ms or 0)} ms",
+        "[content]",
+        str(response.content or ""),
+    ]
+    if response.error_type or response.error:
+        sections.extend(
+            (
+                "[error]",
+                f"type={response.error_type or 'unknown'}\n{response.error or ''}",
+            )
+        )
+    if response.response_metadata:
+        sections.extend(
+            (
+                "[metadata]",
+                json.dumps(response.response_metadata, ensure_ascii=False, indent=2, default=str),
+            )
+        )
+    return "\n".join(sections)
 
 
 def _cache_key(

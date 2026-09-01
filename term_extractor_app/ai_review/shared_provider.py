@@ -51,7 +51,6 @@ def get_shared_ai_settings() -> dict[str, Any]:
         "workspace_enable_thinking": True,
         "reasoning_effort": reasoning_effort,
         "auto_start_after_inspection": bool(ai_review_stage.get("auto_start_after_inspection", False)),
-        "debug_payload_logging": bool(ai_review_stage.get("debug_payload_logging", False)),
         "disable_system_proxy": bool(provider.disable_system_proxy),
         "timeout_seconds": int(provider.timeout_seconds or 90),
         "base_url": provider.base_url,
