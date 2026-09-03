@@ -41,6 +41,7 @@ class SessionCreatePayload(BaseModel):
     title: str = "新审校"
     prompt_template_id: str | None = None
     term_base_id: str | None = None
+    memoq_term_base_ids: list[str] = Field(default_factory=list)
     source_language: str = "auto"
     target_languages: list[str] = Field(default_factory=lambda: ["auto"])
     auto_start: bool = False
@@ -50,6 +51,7 @@ class SessionMessagePayload(BaseModel):
     text: str = ""
     prompt_template_id: str | None = None
     term_base_id: str | None = None
+    memoq_term_base_ids: list[str] | None = None
     source_language: str = "auto"
     target_languages: list[str] = Field(default_factory=lambda: ["auto"])
     auto_start: bool | None = None
@@ -64,6 +66,7 @@ class SessionUpdatePayload(BaseModel):
     auto_start: bool | None = None
     prompt_template_id: str | None = None
     term_base_id: str | None = None
+    memoq_term_base_ids: list[str] | None = None
     source_language: str | None = None
     target_languages: list[str] | None = None
 
@@ -147,6 +150,8 @@ def update_conversation(session_id: str, payload: SessionUpdatePayload) -> dict[
         if term_base_id and not get_term_base(term_base_id):
             raise HTTPException(status_code=400, detail="术语表不存在")
         updates["term_base_id"] = term_base_id
+    if "memoq_term_base_ids" in payload.model_fields_set:
+        updates["memoq_term_base_ids_json"] = [str(x).strip() for x in (payload.memoq_term_base_ids or []) if str(x).strip()]
     if payload.source_language is not None:
         updates["source_language"] = payload.source_language.strip() or "auto"
     if payload.target_languages is not None:
@@ -292,6 +297,8 @@ def send_message(session_id: str, payload: SessionMessagePayload) -> dict[str, A
         if term_base_id and not get_term_base(term_base_id):
             raise HTTPException(status_code=400, detail="术语表不存在")
         update_fields["term_base_id"] = term_base_id
+    if "memoq_term_base_ids" in payload.model_fields_set:
+        update_fields["memoq_term_base_ids_json"] = [str(x).strip() for x in (payload.memoq_term_base_ids or []) if str(x).strip()]
     if payload.auto_start is not None:
         update_fields["auto_start"] = payload.auto_start
     update_session(session_id, **update_fields)

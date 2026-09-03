@@ -18,7 +18,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 if __package__:
     from .ai_review.cache_service import (
@@ -234,7 +234,7 @@ else:
 
 class StartTaskPayload(BaseModel):
     folder_path: str
-    header_name: str = ""
+    header_name: str | list[str] = ""
     source_language: str = "中文"
     file_type: str = ""
     export_review_sheet: bool = False
@@ -242,6 +242,8 @@ class StartTaskPayload(BaseModel):
     single_item_char_limit: int = 500
     batch_request_char_limit: int = 3000
     resume: bool = False
+    memoq_term_base_ids: list[str] = Field(default_factory=list)
+    column_selections: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class SettingsPayload(BaseModel):
@@ -1474,6 +1476,17 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return result.to_dict()
 
+    @app.get("/api/preprocess/mapping-scan")
+    async def preprocess_mapping_scan(folder_path: str):
+        try:
+            result = scan_folder(folder_path)
+            if result.file_type != "excel" or not result.files:
+                return {"file_type": result.file_type, "sheet_names": [], "columns_by_sheet": {}}
+            metadata = read_ai_review_excel_headers(Path(folder_path) / result.files[0])
+            return {"file_type": "excel", "sheet_names": metadata.get("sheet_names", []), "columns_by_sheet": metadata.get("columns_by_sheet", {})}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/dialog/select-folder")
     async def select_folder():
         try:
@@ -2090,6 +2103,8 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
                 file_type=payload.file_type,
                 export_review_sheet=payload.export_review_sheet,
                 extraction_mode=payload.extraction_mode,
+                memoq_term_base_ids=payload.memoq_term_base_ids,
+                column_selections=payload.column_selections,
             )
         try:
             task_facade.start(task_input, resume=payload.resume, settings=settings)
@@ -2217,7 +2232,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <nav class="sidebar-nav">
         <button class="nav-link nav-link-top active" data-page-target="toolGuidePage">工具说明</button>
-        <button class="nav-link nav-link-top" data-page-target="modelSettingsPage">模型设置</button>
+        <button class="nav-link nav-link-top" data-page-target="modelSettingsPage">设置</button>
 
         <details class="nav-accordion" data-accordion-key="text-preprocess">
           <summary class="nav-accordion-summary">
@@ -2316,13 +2331,22 @@ INDEX_HTML = """<!doctype html>
             </div>
             <div class="grid two">
               <label>输入目录<span class="secret-field"><input id="folderPath" placeholder="D:\\项目\\文本表" /><button id="chooseFolderButton" class="mini-button" type="button">选择文件夹</button></span></label>
-              <label>待提取列<select id="headerName"><option value="">请选择待提取列</option></select></label>
-              <label>源语言<input id="sourceLanguage" value="Chinese" /></label>
+              <label>待提取列<span class="secret-field"><input id="headerSelectionSummary" placeholder="扫描后选择工作表和列" readonly /><button id="openPreprocessMappingButton" class="mini-button" type="button" disabled>选择列</button></span></label>
+              <label>源语言<span class="secret-field"><button id="preprocessSourceLanguageChip" class="secondary" type="button">源语言：自动检测</button><select id="sourceLanguage" class="visually-hidden"><option value="auto">自动检测</option><option value="zho-CN">简体中文</option><option value="zho-TW">繁体中文</option><option value="eng">英语</option><option value="jpn">日语</option><option value="kor">韩语</option><option value="fra">法语</option><option value="deu">德语</option><option value="spa">西班牙语</option><option value="por">葡萄牙语</option><option value="ita">意大利语</option><option value="rus">俄语</option></select></span></label>
               <label>运行模式<select id="extractionMode"><option value="terms">提取术语</option><option value="nontrans_only">仅提取非译元素</option></select></label>
             </div>
             <div class="actions">
               <button id="scanButton" class="secondary">扫描目录</button>
+              <button id="preprocessTermBaseChip" class="secondary" type="button">术语表</button>
               <button id="startButton" class="primary">开始提取</button>
+            </div>
+            <div id="preprocessTermBasePopover" class="review-term-base-popover hidden" role="menu" aria-label="选择术语库">
+              <div class="review-term-base-search"><input id="preprocessTermBaseSearch" type="search" placeholder="搜索 memoQ 术语库" autocomplete="off" /></div>
+              <div id="preprocessTermBaseOptions" class="review-term-base-options"></div>
+            </div>
+            <div id="preprocessSourceLanguagePopover" class="review-term-base-popover hidden" role="dialog" aria-label="选择源语言">
+              <div class="review-term-base-search"><input id="preprocessSourceLanguageSearch" type="search" placeholder="搜索源语言" autocomplete="off" /></div>
+              <div id="preprocessSourceLanguageOptions" class="review-term-base-options"></div>
             </div>
             <pre id="scanResult" class="result-box">尚未扫描</pre>
           </section>
@@ -2420,6 +2444,14 @@ INDEX_HTML = """<!doctype html>
           <div class="actions">
             <span id="modelConnectionHint" class="hint"></span>
           </div>
+        </section>
+        <section class="card">
+          <div class="card-title"><h3>memoQ 账号</h3><p>绑定后可在 AI 审校中搜索并多选 memoQ 术语库；凭证仅加密保存在本机。</p></div>
+          <div id="memoqCredentialFields" class="grid two">
+            <label>用户名<input id="memoqUsername" autocomplete="username" /></label>
+            <label>密码<input id="memoqPassword" type="password" autocomplete="current-password" /></label>
+          </div>
+          <div class="actions"><button id="bindMemoQButton" class="primary" type="button">绑定 memoQ 账号</button><button id="unbindMemoQButton" class="secondary danger-text" type="button" hidden>解绑</button><span id="memoqAccountStatus" class="hint">未绑定</span></div>
         </section>
       </section>
 
@@ -2946,11 +2978,9 @@ INDEX_HTML = """<!doctype html>
                 <div id="reviewLanguageOptions" class="review-language-options"></div>
               </div>
               <div id="reviewTermBasePopover" class="review-term-base-popover hidden" role="menu" aria-label="选择术语表">
+                <div class="review-term-base-search"><input id="reviewTermBaseSearch" type="search" placeholder="搜索 memoQ 术语库" autocomplete="off" /></div>
                 <button id="uploadReviewTermBaseButton" class="review-term-base-action" type="button" role="menuitem">
                   <span class="review-term-base-action-icon">＋</span><span><strong>上传术语表</strong><small>支持 .xlsx、.xlsm；自动识别语种列</small></span>
-                </button>
-                <button id="clearReviewTermBaseButton" class="review-term-base-action" type="button" role="menuitem">
-                  <span class="review-term-base-action-icon">∅</span><span><strong>不使用术语表</strong><small>当前会话不进行术语匹配</small></span>
                 </button>
                 <div id="reviewTermBaseOptions" class="review-term-base-options"></div>
               </div>
@@ -3302,6 +3332,14 @@ INDEX_HTML = """<!doctype html>
       </div>
     </form>
   </dialog>
+  <dialog id="preprocessMappingDialog" class="dialog wide-dialog">
+    <form method="dialog" class="dialog-body">
+      <div class="dialog-head"><div><h2>选择待提取列</h2><p>按工作表选择一个或多个提取列，可保存为模板。</p></div><button id="closePreprocessMappingButton" class="icon-button" type="button">×</button></div>
+      <div class="field"><label for="preprocessMappingSourceLanguage">源语言</label><select id="preprocessMappingSourceLanguage"><option value="auto">自动检测</option><option value="zho-CN">简体中文</option><option value="zho-TW">繁体中文</option><option value="eng">英语</option><option value="jpn">日语</option><option value="kor">韩语</option><option value="fra">法语</option><option value="deu">德语</option><option value="spa">西班牙语</option><option value="por">葡萄牙语</option><option value="ita">意大利语</option><option value="rus">俄语</option></select></div>
+      <div id="preprocessMappingSheetTabs" class="sheet-tabs"></div><div id="preprocessMappingColumns" class="excel-mapping-columns"></div>
+      <div class="dialog-actions"><button id="savePreprocessMappingButton" class="secondary" type="button">保存模板</button><button id="applyPreprocessMappingButton" type="button">确认选择</button><button id="cancelPreprocessMappingButton" class="secondary" type="button">取消</button></div>
+    </form>
+  </dialog>
   <div id="appUpdateOverlay" class="modal-overlay" hidden>
     <div class="modal-card notice-modal update-modal">
       <div class="modal-header">
@@ -3593,7 +3631,7 @@ body {
 .pill { width: max-content; padding: 7px 11px; border-radius: 999px; background: #e7f1ef; color: var(--primary-strong); font-weight: 800; }
 .pill.running { background: #fff2cc; color: #865d10; }
 .pill.failed { background: #fde5e2; color: var(--danger); }
-.card { padding: 22px; margin-bottom: 18px; }
+.card { position: relative; padding: 22px; margin-bottom: 18px; }
 .advanced-card { padding: 0; margin-bottom: 18px; overflow: hidden; }
 .advanced-card summary {
   display: flex;
@@ -5084,6 +5122,7 @@ dialog.modal::backdrop { background: rgba(20, 31, 48, .38); backdrop-filter: blu
 .review-language-option.selected { color: #1769d2; background: #e8f0fe; }
 .review-language-option input { position: absolute; opacity: 0; pointer-events: none; }
 .review-language-check { width: 14px; color: #1769d2; font-weight: 800; visibility: hidden; }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .review-language-option.selected .review-language-check { visibility: visible; }
 .review-term-base-chip { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-term-base-popover { position: absolute; z-index: 62; bottom: 56px; left: 14px; width: min(410px, calc(100% - 28px)); max-height: 390px; overflow: hidden auto; padding: 7px; border: 1px solid #d9e1ea; border-radius: 14px; background: #fff; box-shadow: 0 18px 50px rgba(29,43,68,.18); }
@@ -6246,6 +6285,8 @@ let reviewConversationState = {
   targetLanguages: ["auto"],
   promptTemplateId: "",
   termBaseId: "",
+  memoqTermBaseIds: [],
+  memoqTermBases: [],
   termBases: [],
   composerSaveQueue: Promise.resolve(),
   languageMode: "source",
@@ -6262,6 +6303,8 @@ let reviewConversationState = {
   mappingEditorContext: "",
   mappingEditorApplyAfterSave: false,
 };
+let preprocessTermBaseIds = [];
+let preprocessMappingState = { sheetNames: [], columnsBySheet: {}, selected: {}, activeSheet: "" };
 const reviewLanguages = [
   "自动检测", "无源文", "简体中文", "繁体中文", "英语", "日语", "韩语", "法语", "德语", "西班牙语", "葡萄牙语",
   "意大利语", "俄语", "阿拉伯语", "泰语", "越南语", "印尼语", "土耳其语", "波兰语", "荷兰语", "瑞典语",
@@ -6351,7 +6394,7 @@ const TASK_STATUS_BY_PAGE = {
 const PAGE_TASK_LABELS = {
   toolGuidePage: "工具说明",
   overviewPage: "文本预处理工具",
-  modelSettingsPage: "模型设置",
+  modelSettingsPage: "设置",
   modelStageSettingsPage: "文本预处理工具",
   nontransSettingsPage: "文本预处理工具",
   promptSettingsPage: "文本预处理工具",
@@ -6366,7 +6409,7 @@ const PAGE_TASK_LABELS = {
 const PAGE_HERO_COPY = {
   toolGuidePage: { title: "工具说明", lede: "先了解每个工具能做什么，再开始任务。" },
   overviewPage: { title: "文本预处理工具", lede: "用于提取术语、识别非译元素，并整理文本预处理结果。" },
-  modelSettingsPage: { title: "模型设置", lede: "统一管理当前工具使用的模型连接。" },
+  modelSettingsPage: { title: "设置", lede: "统一管理模型连接与 memoQ 账号。" },
   modelStageSettingsPage: { title: "模型阶段设置", lede: "分别控制非译元素、术语召回和术语校验阶段。" },
   nontransSettingsPage: { title: "非译元素设置", lede: "管理检测规则、内置规则库和保护方式。" },
   promptSettingsPage: { title: "提示词设置", lede: "按阶段维护默认提示词。" },
@@ -6714,21 +6757,22 @@ function modelConnectionPayload() {
 
 function setHeaderOptions(headers, preferredValue = "") {
   const select = $("headerName");
+  if (!select) return;
   const values = Array.isArray(headers) ? headers.map((item) => String(item || "").trim()).filter(Boolean) : [];
-  const currentValue = String(preferredValue || select.value || "").trim();
+  const preferred = Array.isArray(preferredValue) ? preferredValue.map(String) : String(preferredValue || select.value || "").split(/[|\n]/).map((item) => item.trim()).filter(Boolean);
   select.innerHTML = "";
 
   const placeholder = document.createElement("option");
   placeholder.value = "";
   placeholder.textContent = values.length ? "请选择待提取列" : "请先选择文件夹";
-  placeholder.selected = !currentValue;
+  placeholder.selected = !preferred.length;
   select.appendChild(placeholder);
 
   values.forEach((name) => {
     const option = document.createElement("option");
     option.value = name;
     option.textContent = name;
-    if (name === currentValue) {
+    if (preferred.includes(name)) {
       option.selected = true;
     }
     select.appendChild(option);
@@ -6738,16 +6782,16 @@ function setHeaderOptions(headers, preferredValue = "") {
 function applyScanResult(data) {
   lastScanResult = data || null;
   $("scanResult").textContent = JSON.stringify(data, null, 2);
+  $("openPreprocessMappingButton").disabled = !(data?.file_type === "excel" && data?.files?.length);
 
   if ((data?.file_type || "") === "xliff") {
-    setHeaderOptions(["source"], "source");
-    $("headerName").value = "source";
-    $("headerName").disabled = true;
+    preprocessMappingState = { sheetNames: [], columnsBySheet: {}, selected: {}, activeSheet: "" };
+    $("headerSelectionSummary").value = "XLIFF source";
+    $("openPreprocessMappingButton").disabled = true;
     return;
   }
 
-  $("headerName").disabled = false;
-  setHeaderOptions(data?.headers || [], $("headerName").value || (data?.headers || [])[0] || "");
+  $("headerSelectionSummary").value = "扫描后选择工作表和列";
 }
 
 function setCrossExcelHeaderSelection(selected) {
@@ -8481,6 +8525,14 @@ async function loadReviewTermBases() {
   reviewConversationState.termBases = Array.isArray(data.term_bases) ? data.term_bases : [];
   renderReviewTermBaseOptions();
   updateReviewComposerChips();
+  try {
+    const status = await api("/api/ai-review/term-bases/memoq/status");
+    if (status.memoq?.bound) {
+      const remote = await api("/api/ai-review/term-bases/memoq/termbases");
+      reviewConversationState.memoqTermBases = Array.isArray(remote.termbases) ? remote.termbases : [];
+    } else reviewConversationState.memoqTermBases = [];
+  } catch (_) { reviewConversationState.memoqTermBases = []; }
+  renderReviewTermBaseOptions();
 }
 
 async function createReviewConversation() {
@@ -8491,6 +8543,7 @@ async function createReviewConversation() {
       title: "新审校",
       prompt_template_id: promptId,
       term_base_id: null,
+      memoq_term_base_ids: [],
       source_language: "auto",
       target_languages: ["auto"],
       auto_start: false,
@@ -8608,11 +8661,12 @@ function applyReviewConversationSessionUpdate(updated) {
 function saveReviewConversationComposerSettings() {
   const sessionId = String(reviewConversationState.currentId || "");
   if (!sessionId) return Promise.resolve();
-  const payload = {
+    const payload = {
     prompt_template_id: reviewConversationState.promptTemplateId || null,
     source_language: reviewConversationState.sourceLanguage || "auto",
     target_languages: [...(reviewConversationState.targetLanguages || ["auto"])],
     term_base_id: reviewConversationState.termBaseId || null,
+    memoq_term_base_ids: reviewConversationState.memoqTermBaseIds || [],
   };
   const save = async () => {
     const data = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}`, {
@@ -8646,6 +8700,7 @@ async function openReviewConversation(sessionId) {
   reviewConversationState.targetLanguages = Array.isArray(session.target_languages) && session.target_languages.length ? session.target_languages : ["auto"];
   reviewConversationState.promptTemplateId = session.prompt_template_id || aiReviewPromptTemplates[0]?.id || "";
   reviewConversationState.termBaseId = session.term_base_id || "";
+  reviewConversationState.memoqTermBaseIds = Array.isArray(session.memoq_term_base_ids) ? session.memoq_term_base_ids : [];
   reviewConversationState.activeTarget = reviewConversationState.activeTarget || snapshot.task_results?.[0]?.target_language || "";
   renderReviewConversationList();
   renderReviewConversationSnapshot();
@@ -9082,6 +9137,7 @@ async function sendReviewConversationMessage() {
         text,
         prompt_template_id: reviewConversationState.promptTemplateId || null,
         term_base_id: reviewConversationState.termBaseId || null,
+        memoq_term_base_ids: reviewConversationState.memoqTermBaseIds || [],
         source_language: reviewConversationState.sourceLanguage,
         target_languages: reviewConversationState.targetLanguages,
         auto_start: $("reviewAutoStart").checked,
@@ -9280,14 +9336,44 @@ function renderReviewTermBaseOptions() {
   const container = $("reviewTermBaseOptions");
   if (!container) return;
   container.innerHTML = "";
-  if (!reviewConversationState.termBases.length) {
+  const query = String($("reviewTermBaseSearch")?.value || "").trim().toLowerCase();
+  const remoteBases = (reviewConversationState.memoqTermBases || []).filter((termBase) => !query || (String(termBase.name || "") + " " + String(termBase.project || "")).toLowerCase().includes(query));
+  const selectedRemoteBases = remoteBases.filter((termBase) => reviewConversationState.memoqTermBaseIds.includes(termBase.id));
+  const unselectedRemoteBases = remoteBases.filter((termBase) => !reviewConversationState.memoqTermBaseIds.includes(termBase.id));
+  [...selectedRemoteBases, ...unselectedRemoteBases].forEach((termBase) => {
+    const row = document.createElement("div");
+    row.className = "review-term-base-option" + (reviewConversationState.memoqTermBaseIds.includes(termBase.id) ? " selected" : "");
+    row.setAttribute("role", "menuitem");
+    const check = document.createElement("span");
+    check.className = "review-term-base-option-check";
+    check.textContent = reviewConversationState.memoqTermBaseIds.includes(termBase.id) ? "✓" : "";
+    const copy = document.createElement("span");
+    copy.className = "review-term-base-option-copy";
+    const name = document.createElement("strong");
+    name.textContent = termBase.name || "memoQ 术语库";
+    const meta = document.createElement("small");
+    meta.textContent = "memoQ" + (termBase.project ? " · " + termBase.project : "");
+    copy.append(name, meta); row.append(check, copy);
+    row.addEventListener("click", () => {
+      const ids = new Set(reviewConversationState.memoqTermBaseIds);
+      if (ids.has(termBase.id)) ids.delete(termBase.id); else ids.add(termBase.id);
+      reviewConversationState.memoqTermBaseIds = Array.from(ids);
+      reviewConversationState.termBaseId = "";
+      renderReviewTermBaseOptions(); updateReviewComposerChips();
+      saveReviewConversationComposerSettings().catch(showReviewConversationError);
+    });
+    container.appendChild(row);
+  });
+  if (!reviewConversationState.termBases.length && !(reviewConversationState.memoqTermBases || []).length) {
     const empty = document.createElement("p");
     empty.className = "hint";
     empty.textContent = "尚未缓存术语表";
     container.appendChild(empty);
     return;
   }
-  reviewConversationState.termBases.forEach((termBase) => {
+  const selectedLocalBases = reviewConversationState.termBases.filter((termBase) => termBase.id === reviewConversationState.termBaseId);
+  const unselectedLocalBases = reviewConversationState.termBases.filter((termBase) => termBase.id !== reviewConversationState.termBaseId);
+  [...selectedLocalBases, ...unselectedLocalBases].forEach((termBase) => {
     const row = document.createElement("div");
     row.className = `review-term-base-option ${termBase.id === reviewConversationState.termBaseId ? "selected" : ""}`.trim();
     row.setAttribute("role", "menuitem");
@@ -9417,7 +9503,9 @@ function updateReviewComposerChips() {
   const targets = reviewConversationState.targetLanguages.map((value) => value === "auto" ? "自动" : value);
   $("reviewTargetLanguageChip").textContent = `目标语言：${targets.join("、")}`;
   const termBase = currentReviewTermBase();
-  $("reviewTermBaseChip").textContent = termBase?.filename || "术语表";
+  const remote = (reviewConversationState.memoqTermBases || []).filter((item) => reviewConversationState.memoqTermBaseIds.includes(item.id));
+  const remoteCount = remote.length;
+  $("reviewTermBaseChip").textContent = remoteCount === 1 ? remote[0].name : remoteCount ? "术语表（" + remoteCount + "）" : (termBase?.filename || "术语表");
   $("reviewTermBaseChip").title = termBase
     ? `${termBase.filename} · ${Number(termBase.entry_count || 0)} 条术语`
     : "选择术语表";
@@ -10358,8 +10446,8 @@ async function scanFolder() {
     applyScanResult(data);
   } catch (error) {
     lastScanResult = null;
-    $("headerName").disabled = false;
-    setHeaderOptions([], "");
+    $("headerSelectionSummary").value = "扫描后选择工作表和列";
+    $("openPreprocessMappingButton").disabled = true;
     $("scanResult").textContent = error.message;
   }
 }
@@ -10727,9 +10815,10 @@ async function highlightDiffExcel() {
 }
 
 async function startTask() {
+  const selectedHeaders = Object.values(preprocessMappingState.selected).flat().filter(Boolean);
   const payload = {
     folder_path: $("folderPath").value.trim(),
-    header_name: $("headerName").value.trim(),
+    header_name: selectedHeaders,
     source_language: $("sourceLanguage").value.trim() || "中文",
     file_type: "",
     export_review_sheet: true,
@@ -10737,6 +10826,8 @@ async function startTask() {
     single_item_char_limit: 500,
     batch_request_char_limit: Number($("recallLimit").value || 3000),
     resume: false,
+    memoq_term_base_ids: preprocessTermBaseIds || [],
+    column_selections: preprocessMappingState.selected || {},
   };
   $("errorPanel").hidden = true;
   await saveSettings();
@@ -10799,6 +10890,79 @@ function formatProgressPercent(current, total, isRunning) {
   }
   const percent = Math.min(100, Math.max(0, Math.round((safeCurrent / safeTotal) * 100)));
   return `${percent}%`;
+}
+
+let preprocessTermBases = [];
+function renderPreprocessTermBases() {
+  const q = $("preprocessTermBaseSearch").value.trim().toLowerCase();
+  const container = $("preprocessTermBaseOptions"); container.replaceChildren();
+  const visible = preprocessTermBases.filter((b) => `${b.name || ""} ${b.project || ""}`.toLowerCase().includes(q));
+  const selected = visible.filter((b) => preprocessTermBaseIds.includes(String(b.id)));
+  [...selected, ...visible.filter((b) => !preprocessTermBaseIds.includes(String(b.id)))].forEach((b) => {
+    const row = document.createElement("div"); row.className = "review-term-base-option" + (preprocessTermBaseIds.includes(String(b.id)) ? " selected" : "");
+    const check = document.createElement("span"); check.className = "review-term-base-option-check"; check.textContent = preprocessTermBaseIds.includes(String(b.id)) ? "✓" : "";
+    const copy = document.createElement("span"); copy.className = "review-term-base-option-copy";
+    const name = document.createElement("strong"); name.textContent = b.name || "memoQ 术语库";
+    const meta = document.createElement("small"); meta.textContent = `memoQ${b.project ? " · " + b.project : ""}`; copy.append(name, meta); row.append(check, copy);
+    row.addEventListener("click", () => { const id = String(b.id); preprocessTermBaseIds = preprocessTermBaseIds.includes(id) ? preprocessTermBaseIds.filter((x) => x !== id) : [...preprocessTermBaseIds, id]; renderPreprocessTermBases(); updatePreprocessTermBaseChip(); });
+    container.appendChild(row);
+  });
+  if (!visible.length) { const empty = document.createElement("div"); empty.className = "hint"; empty.textContent = "没有匹配的术语库"; container.appendChild(empty); }
+}
+function updatePreprocessTermBaseChip() { $("preprocessTermBaseChip").textContent = preprocessTermBaseIds.length ? `术语表（${preprocessTermBaseIds.length}）` : "术语表"; }
+const preprocessLanguages = [["auto","自动检测"],["zho-CN","简体中文"],["zho-TW","繁体中文"],["eng","英语"],["jpn","日语"],["kor","韩语"],["fra","法语"],["deu","德语"],["spa","西班牙语"],["por","葡萄牙语"],["ita","意大利语"],["rus","俄语"]];
+function renderPreprocessLanguages() {
+  const q = $("preprocessSourceLanguageSearch").value.trim().toLowerCase(); const box = $("preprocessSourceLanguageOptions"); box.replaceChildren();
+  preprocessLanguages.filter(([, label]) => label.toLowerCase().includes(q)).forEach(([value, label]) => { const row = document.createElement("div"); row.className = "review-term-base-option" + ($("sourceLanguage").value === value ? " selected" : ""); row.innerHTML = `<span class="review-term-base-option-check">${$("sourceLanguage").value === value ? "✓" : ""}</span><span class="review-term-base-option-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(value)}</small></span>`; row.onclick = () => { $("sourceLanguage").value = value; $("preprocessSourceLanguageChip").textContent = `源语言：${label}`; $("preprocessSourceLanguagePopover").classList.add("hidden"); }; box.appendChild(row); });
+}
+async function choosePreprocessTermBases() {
+  const status = await api("/api/ai-review/term-bases/memoq/status");
+  const popover = $("preprocessTermBasePopover");
+  if (!status.memoq?.bound) {
+    $("preprocessTermBaseOptions").innerHTML = '<div class="hint">请先在“设置”中绑定 memoQ 账号</div>';
+    popover.classList.remove("hidden");
+    return;
+  }
+  const data = await api(`/api/ai-review/term-bases/memoq/termbases?q=${encodeURIComponent($("preprocessTermBaseSearch").value || "")}`);
+  preprocessTermBases = Array.isArray(data.termbases) ? data.termbases : [];
+  renderPreprocessTermBases();
+  popover.classList.toggle("hidden");
+  if (!popover.classList.contains("hidden")) $("preprocessTermBaseSearch").focus();
+}
+
+async function openPreprocessMappingDialog() {
+  const folder = $("folderPath").value.trim();
+  if (!folder) throw new Error("请先选择输入目录");
+  const data = await api(`/api/preprocess/mapping-scan?folder_path=${encodeURIComponent(folder)}`);
+  preprocessMappingState.sheetNames = data.sheet_names || [];
+  preprocessMappingState.columnsBySheet = data.columns_by_sheet || {};
+  preprocessMappingState.selected = preprocessMappingState.selected || {};
+  preprocessMappingState.activeSheet = preprocessMappingState.activeSheet || preprocessMappingState.sheetNames[0] || "";
+  $("preprocessMappingSourceLanguage").value = $("sourceLanguage").value || "auto";
+  const tabs = $("preprocessMappingSheetTabs"); tabs.innerHTML = "";
+  preprocessMappingState.sheetNames.forEach((sheet) => { const b = document.createElement("button"); b.type = "button"; b.className = "sheet-tab" + (sheet === preprocessMappingState.activeSheet ? " active" : ""); b.textContent = sheet; b.onclick = () => { preprocessMappingState.activeSheet = sheet; openPreprocessMappingDialog().catch(() => undefined); }; tabs.appendChild(b); });
+  const columns = $("preprocessMappingColumns"); columns.innerHTML = "";
+  const selected = new Set(preprocessMappingState.selected[preprocessMappingState.activeSheet] || []);
+  (preprocessMappingState.columnsBySheet[preprocessMappingState.activeSheet] || []).forEach((column) => { const label = document.createElement("label"); label.className = "mapping-row"; label.innerHTML = `<span class="mapping-col-id">${escapeHtml(String(column.letter || ""))}</span><span class="mapping-header">${escapeHtml(String(column.header || ""))}</span><span class="check-line"><input type="checkbox" value="${escapeHtml(String(column.header || ""))}" ${selected.has(String(column.header || "")) ? "checked" : ""}/> 提取</span>`; columns.appendChild(label); });
+  $("preprocessMappingDialog").showModal();
+}
+
+function applyPreprocessMappingDialog() {
+  const sheet = preprocessMappingState.activeSheet;
+  preprocessMappingState.selected[sheet] = Array.from($("preprocessMappingColumns").querySelectorAll("input:checked")).map((input) => input.value);
+  $("sourceLanguage").value = $("preprocessMappingSourceLanguage").value;
+  const languageLabel = preprocessLanguages.find(([value]) => value === $("sourceLanguage").value)?.[1] || "自动检测";
+  $("preprocessSourceLanguageChip").textContent = `源语言：${languageLabel}`;
+  const count = Object.values(preprocessMappingState.selected).flat().filter(Boolean).length;
+  $("headerSelectionSummary").value = count ? `${count} 列（${Object.keys(preprocessMappingState.selected).filter((key) => preprocessMappingState.selected[key]?.length).length} 个工作表）` : "尚未选择";
+  $("preprocessMappingDialog").close();
+}
+function preprocessMappingTemplateKey() { return "yeehe_preprocess_mapping_templates_v1"; }
+function savePreprocessMappingTemplate() {
+  const name = window.prompt("模板名称", "新建模板"); if (!name) return;
+  const all = JSON.parse(localStorage.getItem(preprocessMappingTemplateKey()) || "{}");
+  all[name] = { selected: preprocessMappingState.selected, source_language: $("preprocessMappingSourceLanguage").value };
+  localStorage.setItem(preprocessMappingTemplateKey(), JSON.stringify(all));
 }
 
 function getPreprocessProgressState(data) {
@@ -10907,7 +11071,58 @@ async function refreshStatus() {
   }
 }
 
+async function loadMemoQAccountStatus() {
+  try {
+    const data = await api("/api/ai-review/term-bases/memoq/status");
+    const bound = Boolean(data.memoq?.bound);
+    $("memoqAccountStatus").textContent = bound ? "已绑定：" + data.memoq.username : "未绑定";
+    $("memoqAccountStatus").classList.remove("error");
+    $("memoqCredentialFields").classList.toggle("hidden", bound);
+    $("bindMemoQButton").classList.toggle("hidden", bound);
+    $("unbindMemoQButton").hidden = !bound;
+    $("unbindMemoQButton").classList.toggle("hidden", !bound);
+  } catch (_) {
+    $("memoqAccountStatus").textContent = "无法读取绑定状态，请稍后重试";
+    $("memoqAccountStatus").classList.add("error");
+  }
+}
+async function bindMemoQAccount() {
+  const username = $("memoqUsername").value.trim();
+  const password = $("memoqPassword").value;
+  if (!username || !password) throw new Error("请输入 memoQ 用户名和密码");
+  $("bindMemoQButton").disabled = true;
+  $("memoqAccountStatus").textContent = "正在验证账号…";
+  $("memoqAccountStatus").classList.remove("error");
+  try {
+    await api("/api/ai-review/term-bases/memoq/bind", { method: "POST", body: JSON.stringify({ username, password }) });
+    $("memoqPassword").value = ""; await loadMemoQAccountStatus(); await loadReviewTermBases();
+  } catch (error) {
+    $("memoqAccountStatus").textContent = "绑定失败，请检查账号、密码或 memoQ 服务器连接";
+    $("memoqAccountStatus").classList.add("error");
+    throw error;
+  } finally { $("bindMemoQButton").disabled = false; }
+}
 $("saveModelConnectionButton").addEventListener("click", saveModelConnection);
+$("preprocessTermBaseChip").addEventListener("click", () => choosePreprocessTermBases().catch((error) => { $("scanResult").textContent = error.message; }));
+$("preprocessTermBaseSearch").addEventListener("input", renderPreprocessTermBases);
+$("preprocessSourceLanguageChip").addEventListener("click", () => { renderPreprocessLanguages(); $("preprocessSourceLanguagePopover").classList.toggle("hidden"); $("preprocessSourceLanguageSearch").focus(); });
+$("preprocessSourceLanguageSearch").addEventListener("input", renderPreprocessLanguages);
+document.addEventListener("pointerdown", (event) => {
+  const langPopover = $("preprocessSourceLanguagePopover");
+  const langChip = $("preprocessSourceLanguageChip");
+  if (!langPopover.classList.contains("hidden") && !langPopover.contains(event.target) && !langChip.contains(event.target)) langPopover.classList.add("hidden");
+  const termPopover = $("preprocessTermBasePopover");
+  const termChip = $("preprocessTermBaseChip");
+  if (!termPopover.classList.contains("hidden") && !termPopover.contains(event.target) && !termChip.contains(event.target)) termPopover.classList.add("hidden");
+});
+$("openPreprocessMappingButton").addEventListener("click", () => openPreprocessMappingDialog().catch((error) => { $("scanResult").textContent = error.message; }));
+$("applyPreprocessMappingButton").addEventListener("click", applyPreprocessMappingDialog);
+$("savePreprocessMappingButton").addEventListener("click", savePreprocessMappingTemplate);
+$("cancelPreprocessMappingButton").addEventListener("click", () => $("preprocessMappingDialog").close());
+$("closePreprocessMappingButton").addEventListener("click", () => $("preprocessMappingDialog").close());
+$("bindMemoQButton").addEventListener("click", () => bindMemoQAccount().catch(() => undefined));
+$("unbindMemoQButton").addEventListener("click", async () => { await api("/api/ai-review/term-bases/memoq/bind", { method: "DELETE" }); await loadMemoQAccountStatus(); await loadReviewTermBases(); });
+loadMemoQAccountStatus();
 $("saveSettingsButton").addEventListener("click", saveSettings);
 $("savePromptTemplatesButton").addEventListener("click", savePromptTemplates);
 $("resetPromptTemplatesButton").addEventListener("click", resetPromptTemplates);
@@ -10998,11 +11213,11 @@ document.querySelectorAll('input[name="reviewAttachmentMappingMode"]').forEach((
 });
 $("reviewUploadChip").addEventListener("click", () => chooseReviewConversationFiles().catch(showReviewConversationError));
 $("reviewTermBaseChip").addEventListener("click", toggleReviewTermBasePopover);
+$("reviewTermBaseSearch").addEventListener("input", renderReviewTermBaseOptions);
 $("uploadReviewTermBaseButton").addEventListener("click", () => {
   closeReviewTermBasePopover();
   $("reviewTermBaseFileInput").click();
 });
-$("clearReviewTermBaseButton").addEventListener("click", () => selectReviewTermBase("").catch(showReviewConversationError));
 $("reviewTermBaseFileInput").addEventListener("change", () => {
   const file = $("reviewTermBaseFileInput").files?.[0];
   uploadReviewTermBase(file).catch(showReviewConversationError).finally(() => ($("reviewTermBaseFileInput").value = ""));

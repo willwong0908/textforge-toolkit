@@ -18,6 +18,7 @@ def create_session(
     title: str = "新审校",
     prompt_template_id: str | None = None,
     term_base_id: str | None = None,
+    memoq_term_base_ids: list[str] | None = None,
     source_language: str = "auto",
     target_languages: list[str] | None = None,
     auto_start: bool = False,
@@ -30,9 +31,9 @@ def create_session(
         conn.execute(
             """
             INSERT INTO review_sessions (
-                id, title, title_custom, status, prompt_template_id, term_base_id, source_language,
+                id, title, title_custom, status, prompt_template_id, term_base_id, memoq_term_base_ids_json, source_language,
                 target_languages_json, auto_start, created_at, updated_at
-            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -40,6 +41,7 @@ def create_session(
                 0 if str(title or "").strip() in {"", "新审校"} else 1,
                 prompt_template_id,
                 term_base_id,
+                dumps_json([str(x) for x in (memoq_term_base_ids or []) if str(x).strip()]),
                 str(source_language or "auto").strip() or "auto",
                 dumps_json(targets),
                 1 if auto_start else 0,
@@ -112,12 +114,14 @@ def get_session_snapshot(session_id: str) -> dict[str, Any] | None:
 
 def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
     allowed = {
-        "title", "title_custom", "status", "prompt_template_id", "term_base_id", "source_language", "target_languages_json",
+        "title", "title_custom", "status", "prompt_template_id", "term_base_id", "memoq_term_base_ids_json", "source_language", "target_languages_json",
         "auto_start", "context_summary", "error_message",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
     if "target_languages_json" in values and isinstance(values["target_languages_json"], list):
         values["target_languages_json"] = dumps_json(_normalize_languages(values["target_languages_json"]))
+    if "memoq_term_base_ids_json" in values and isinstance(values["memoq_term_base_ids_json"], list):
+        values["memoq_term_base_ids_json"] = dumps_json([str(x) for x in values["memoq_term_base_ids_json"] if str(x).strip()])
     if "auto_start" in values:
         values["auto_start"] = 1 if values["auto_start"] else 0
     if "title_custom" in values:
@@ -704,6 +708,7 @@ def _session_to_dict(row: Any) -> dict[str, Any]:
         "status": row["status"],
         "prompt_template_id": row["prompt_template_id"],
         "term_base_id": row["term_base_id"] if "term_base_id" in row.keys() else None,
+        "memoq_term_base_ids": loads_json(row["memoq_term_base_ids_json"], []) if "memoq_term_base_ids_json" in row.keys() else [],
         "source_language": row["source_language"],
         "target_languages": loads_json(row["target_languages_json"], ["auto"]),
         "auto_start": bool(row["auto_start"]),

@@ -56,6 +56,7 @@ from .models import (
     now_iso,
     sync_extraction_flags,
 )
+from .ai_review.memoq_service import MemoQError, lookup_terms
 from .nontrans import (
     attach_runtime_examples_to_nontrans_rows,
     build_missing_regex_generation_batches,
@@ -595,6 +596,7 @@ class TermExtractionService:
                 folder_path=task_input.folder_path,
                 file_type=scan_result.file_type,
                 header_name=task_input.header_name,
+                sheet_selections=task_input.column_selections,
                 progress_callback=lambda payload: self._on_read_progress(runtime, payload),
             )
             runtime.source_records = [item.to_dict() for item in source_records]
@@ -1328,6 +1330,12 @@ class TermExtractionService:
         )
         recall_enable_thinking = self._stage_enable_thinking("term_recall_stage_settings")
         recall_reasoning_effort = self._stage_reasoning_effort("term_recall_stage_settings")
+
+        if task_input.memoq_term_base_ids:
+            candidate_user_prompt_template += (
+                "\n\n术语库增量规则：仅提取 memoQ 术语库中尚未收录的增量术语；"
+                "不要重复返回已有术语，也不要为了凑数量改写已有术语。"
+            )
         total_items = len(segments)
         filtered_segment_ids = set()
         for segment in segments:
@@ -1458,6 +1466,20 @@ class TermExtractionService:
             key=lambda item: (item.surface_form, item.segment_id, item.recall_source),
         )
         merged_candidate_terms = merge_candidate_terms(candidate_terms)
+        if task_input.memoq_term_base_ids and merged_candidate_terms:
+            try:
+                existing = lookup_terms(
+                    task_input.memoq_term_base_ids,
+                    task_input.source_language,
+                    "",
+                    [item.surface_form for item in merged_candidate_terms],
+                )
+                existing_sources = {str(item.get("source") or "").strip().casefold() for item in existing}
+                before_count = len(merged_candidate_terms)
+                merged_candidate_terms = [item for item in merged_candidate_terms if item.surface_form.strip().casefold() not in existing_sources]
+                self._log("memoQ 术语库去重完成：移除已有术语 {0} 条，保留增量术语 {1} 条。".format(before_count - len(merged_candidate_terms), len(merged_candidate_terms)))
+            except MemoQError as exc:
+                self._log("memoQ 术语库去重失败，继续审核召回结果：{0}".format(exc))
         runtime.candidate_terms = [item.to_dict() for item in merged_candidate_terms]
         runtime.stats["candidate_count"] = len(merged_candidate_terms)
         runtime.stats["progress_current"] = total_items

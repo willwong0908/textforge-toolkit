@@ -17,6 +17,7 @@ from .prompt_service import get_prompt_template
 from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings
 from .session_store import emit_event
 from .term_base_service import get_term_base, match_terms
+from .memoq_service import lookup_terms, MemoQError
 from ..models import LLMRequest, LLMResponse
 from ..logging_utils import LOGGER_NAME, configure_file_logger
 from ..providers import ProviderRegistry
@@ -97,6 +98,7 @@ def create_review_task(
     forbidden_template_id: str | None = None,
     session_id: str | None = None,
     term_base_id: str | None = None,
+    memoq_term_base_ids: list[str] | None = None,
 ) -> str:
     if mode == "directional":
         raise ReviewTaskError("定向审校已移除，请使用提示词模板配置审校规则")
@@ -194,6 +196,8 @@ def create_review_task(
             "term_base_id": str(term_base_id or ""),
             "term_base_name": str((term_base or {}).get("filename") or ""),
             "term_base_hash": str((term_base or {}).get("file_hash") or ""),
+            "memoq_term_base_ids": [str(x) for x in (memoq_term_base_ids or []) if str(x).strip()],
+            "memoq_term_pairs": [],
         }
     with get_connection() as conn:
         conn.execute(
@@ -556,6 +560,26 @@ def _run_review_task_impl(task_id: str) -> None:
 
     if enable_ai_review:
         model = config["model"]
+        memoq_ids = [str(x) for x in (config.get("memoq_term_base_ids") or []) if str(x).strip()]
+        if memoq_ids:
+            try:
+                pairs = lookup_terms(
+                    memoq_ids,
+                    str(config.get("source_language") or "auto"),
+                    str(config.get("target_language") or "auto"),
+                    [str(item.get("source_text") or "") for item in items if str(item.get("source_text") or "").strip()],
+                )
+                unique: list[dict[str, Any]] = []
+                seen: set[str] = set()
+                for pair in pairs:
+                    key = _term_pair_key(pair)
+                    if key not in seen:
+                        seen.add(key)
+                        unique.append(pair)
+                config["memoq_term_pairs"] = unique
+                _add_log(task_id, "info", f"memoQ 术语库已匹配 {len(unique)} 个术语对，将按批次提供给模型。")
+            except MemoQError as exc:
+                _add_log(task_id, "warning", f"memoQ 术语提取失败，继续执行但不应用远程术语库：{exc}")
         term_base_id = str(config.get("term_base_id") or "")
         term_match_count = 0
         term_language_warning: dict[str, Any] | None = None
@@ -1257,6 +1281,9 @@ def _build_request_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"items": [_payload_item(item) for item in package]}
     term_pairs = _package_term_pairs(package)
+    for pair in config.get("memoq_term_pairs") or []:
+        if isinstance(pair, dict) and _term_pair_key(pair) not in {_term_pair_key(x) for x in term_pairs}:
+            term_pairs.append(pair)
     if term_pairs:
         payload["term_pairs"] = term_pairs
     if config.get("mode") == "directional":

@@ -1,6 +1,7 @@
 """Typed application models."""
 
 from dataclasses import asdict, dataclass, field
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -99,6 +100,8 @@ class TaskInput:
     file_type: str = ""
     export_review_sheet: bool = True
     extraction_mode: str = "terms"
+    memoq_term_base_ids: List[str] = field(default_factory=list)
+    column_selections: Dict[str, List[str]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -109,13 +112,15 @@ class TaskInput:
         legacy_batch_limit = int(data.get("max_chars_per_request", 3000) or 3000)
         return cls(
             folder_path=str(data.get("folder_path", "")),
-            header_name=str(data.get("header_name", "")),
+            header_name=(json.dumps(data.get("header_name"), ensure_ascii=False) if isinstance(data.get("header_name"), list) else str(data.get("header_name", ""))),
             source_language=str(data.get("source_language", "")),
             single_item_char_limit=int(data.get("single_item_char_limit", 500) or 500),
             batch_request_char_limit=int(data.get("batch_request_char_limit", legacy_batch_limit) or legacy_batch_limit),
             file_type=str(data.get("file_type", "")),
             export_review_sheet=bool(export_review_sheet),
             extraction_mode=normalize_extraction_mode(data.get("extraction_mode", "terms")),
+            memoq_term_base_ids=[str(x) for x in (data.get("memoq_term_base_ids") or []) if str(x).strip()],
+            column_selections={str(k): [str(x) for x in (v or []) if str(x).strip()] for k, v in (data.get("column_selections") or {}).items()},
         )
 
 

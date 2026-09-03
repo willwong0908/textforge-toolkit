@@ -239,6 +239,7 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'draft',
                 prompt_template_id TEXT,
                 term_base_id TEXT,
+                memoq_term_base_ids_json TEXT NOT NULL DEFAULT '[]',
                 source_language TEXT NOT NULL DEFAULT 'auto',
                 target_languages_json TEXT NOT NULL DEFAULT '["auto"]',
                 auto_start INTEGER NOT NULL DEFAULT 0,
@@ -432,6 +433,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE review_sessions ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0")
         if "term_base_id" not in session_columns:
             conn.execute("ALTER TABLE review_sessions ADD COLUMN term_base_id TEXT")
+        if "memoq_term_base_ids_json" not in session_columns:
+            conn.execute("ALTER TABLE review_sessions ADD COLUMN memoq_term_base_ids_json TEXT NOT NULL DEFAULT '[]'")
         attachment_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_attachments)").fetchall()

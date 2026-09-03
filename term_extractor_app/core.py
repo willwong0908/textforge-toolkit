@@ -292,11 +292,13 @@ def read_source_records(
     folder_path: str,
     file_type: str,
     header_name: str,
+    sheet_selections: Optional[Dict[str, Sequence[str]]] = None,
     progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
 ) -> Tuple[List[SourceRecord], List[str]]:
     records: List[SourceRecord] = []
     processed_files: List[str] = []
     scan_result = scan_folder(folder_path)
+    header_names = _normalize_header_names(header_name)
 
     for index, filename in enumerate(scan_result.files, start=1):
         file_path = os.path.join(folder_path, filename)
@@ -312,9 +314,9 @@ def read_source_records(
             )
 
         if file_type == "excel":
-            records.extend(_read_excel_records(file_path, header_name))
+            records.extend(_read_excel_records(file_path, header_names, sheet_selections))
         elif file_type == "csv":
-            records.extend(_read_csv_records(file_path, header_name))
+            records.extend(_read_csv_records(file_path, header_names))
         else:
             records.extend(_read_xliff_records(file_path))
         processed_files.append(filename)
@@ -336,84 +338,66 @@ def read_source_records(
     return unique_records, processed_files
 
 
-def _read_excel_records(file_path: str, header_name: str) -> List[SourceRecord]:
+def _normalize_header_names(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        text = str(value or "").strip()
+        try:
+            parsed = json.loads(text)
+            values = parsed if isinstance(parsed, list) else [text]
+        except json.JSONDecodeError:
+            values = re.split(r"\s*[|\n]\s*", text) if text else []
+    return preserve_unique(str(item).strip() for item in values if str(item).strip())
+
+
+def _read_excel_records(file_path: str, header_names: Sequence[str], sheet_selections: Optional[Dict[str, Sequence[str]]] = None) -> List[SourceRecord]:
     collected: List[SourceRecord] = []
     if is_streamable_excel(file_path):
         with open_streaming_workbook(file_path) as workbook:
             for sheet in workbook.worksheets:
+                selected_names = list(sheet_selections.get(sheet.title, ())) if sheet_selections else list(header_names)
+                if sheet_selections and sheet.title not in sheet_selections:
+                    continue
                 first_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
                 columns = header_map_from_values(first_row)
-                column_index = columns.get(header_name)
-                if column_index is None:
-                    continue
+                selected = [(name, columns[name]) for name in selected_names if name in columns]
                 for row_index, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-                    value = row[column_index] if column_index < len(row) else None
-                    text = _clean_text(value)
-                    if not text:
-                        continue
-                    collected.append(
-                        SourceRecord(
-                            record_id="{0}:{1}:{2}:{3}".format(
-                                os.path.basename(file_path), sheet.title, row_index, header_name
-                            ),
-                            file_name=os.path.basename(file_path),
-                            source_type="excel",
-                            sheet_or_unit=str(sheet.title),
-                            row_index=row_index,
-                            column_name=str(header_name),
-                            text=text,
-                        )
-                    )
+                    for header_name, column_index in selected:
+                        text = _clean_text(row[column_index] if column_index < len(row) else None)
+                        if text:
+                            collected.append(SourceRecord(record_id="{0}:{1}:{2}:{3}".format(os.path.basename(file_path), sheet.title, row_index, header_name), file_name=os.path.basename(file_path), source_type="excel", sheet_or_unit=str(sheet.title), row_index=row_index, column_name=str(header_name), text=text))
         return collected
 
     xls = _open_excel_file(file_path)
     try:
         for sheet_name in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet_name)
-            if header_name not in df.columns:
+            selected_names = list(sheet_selections.get(sheet_name, ())) if sheet_selections else list(header_names)
+            if sheet_selections and sheet_name not in sheet_selections:
                 continue
-            for row_index, value in enumerate(df[header_name].tolist(), start=2):
-                text = _clean_text(value)
-                if not text:
+            df = pd.read_excel(xls, sheet_name=sheet_name)
+            for header_name in selected_names:
+                if header_name not in df.columns:
                     continue
-                collected.append(
-                    SourceRecord(
-                        record_id="{0}:{1}:{2}:{3}".format(
-                            os.path.basename(file_path), sheet_name, row_index, header_name
-                        ),
-                        file_name=os.path.basename(file_path),
-                        source_type="excel",
-                        sheet_or_unit=str(sheet_name),
-                        row_index=row_index,
-                        column_name=str(header_name),
-                        text=text,
-                    )
-                )
+                for row_index, value in enumerate(df[header_name].tolist(), start=2):
+                    text = _clean_text(value)
+                    if text:
+                        collected.append(SourceRecord(record_id="{0}:{1}:{2}:{3}".format(os.path.basename(file_path), sheet_name, row_index, header_name), file_name=os.path.basename(file_path), source_type="excel", sheet_or_unit=str(sheet_name), row_index=row_index, column_name=str(header_name), text=text))
     finally:
         xls.close()
     return collected
 
 
-def _read_csv_records(file_path: str, header_name: str) -> List[SourceRecord]:
+def _read_csv_records(file_path: str, header_names: Sequence[str]) -> List[SourceRecord]:
     df = _read_csv(file_path)
-    if header_name not in df.columns:
-        return []
     collected = []
-    for row_index, value in enumerate(df[header_name].tolist(), start=2):
-        text = _clean_text(value)
-        if not text:
+    for header_name in header_names:
+        if header_name not in df.columns:
             continue
-        collected.append(
-            SourceRecord(
-                record_id="{0}:{1}:{2}".format(os.path.basename(file_path), row_index, header_name),
-                file_name=os.path.basename(file_path),
-                source_type="csv",
-                sheet_or_unit="",
-                row_index=row_index,
-                column_name=str(header_name),
-                text=text,
-            )
-        )
+        for row_index, value in enumerate(df[header_name].tolist(), start=2):
+            text = _clean_text(value)
+            if text:
+                collected.append(SourceRecord(record_id="{0}:{1}:{2}".format(os.path.basename(file_path), row_index, header_name), file_name=os.path.basename(file_path), source_type="csv", sheet_or_unit="", row_index=row_index, column_name=str(header_name), text=text))
     return collected
 
 
