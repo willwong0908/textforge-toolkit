@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 from .excel_streaming import header_map_from_values, is_streamable_excel, open_streaming_workbook
 
@@ -269,6 +270,36 @@ def get_available_headers(folder_path: str, file_type: str) -> List[str]:
     return preserve_unique(headers)
 
 
+def read_excel_header_metadata(file_path: str | Path) -> Dict[str, object]:
+    """Read sheet/header metadata for the preprocessing mapping UI."""
+    path = Path(file_path)
+    columns_by_sheet: Dict[str, List[Dict[str, object]]] = {}
+    if is_streamable_excel(path):
+        with open_streaming_workbook(path) as workbook:
+            for sheet in workbook.worksheets:
+                first_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+                columns_by_sheet[str(sheet.title)] = [
+                    {"index": index, "letter": get_column_letter(index + 1), "header": str(value).strip()}
+                    for index, value in enumerate(first_row)
+                    if value is not None and str(value).strip()
+                ]
+    else:
+        workbook = _open_excel_file(str(path))
+        try:
+            for sheet_name in workbook.sheet_names:
+                frame = pd.read_excel(workbook, sheet_name=sheet_name, nrows=0)
+                columns_by_sheet[str(sheet_name)] = [
+                    {"index": index, "letter": get_column_letter(index + 1), "header": str(value).strip()}
+                    for index, value in enumerate(frame.columns)
+                    if str(value).strip()
+                ]
+        finally:
+            workbook.close()
+    if not any(columns_by_sheet.values()):
+        raise ValueError("没有读取到可用列，请确认 Excel 第一行包含表头。")
+    return {"sheet_names": list(columns_by_sheet), "columns_by_sheet": columns_by_sheet}
+
+
 def _read_csv(file_path: str) -> pd.DataFrame:
     last_error = None
     for encoding in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
@@ -299,13 +330,17 @@ def read_source_records(
 ) -> Tuple[List[SourceRecord], List[str]]:
     records: List[SourceRecord] = []
     processed_files: List[str] = []
-    scan_result = scan_folder(folder_path)
     header_names = _normalize_header_names(header_name)
-    file_paths = [str(Path(item)) for item in (input_files or []) if Path(item).is_file()]
+    requested_files = [Path(item).expanduser() for item in (input_files or []) if str(item).strip()]
+    missing_files = [str(path) for path in requested_files if not path.is_file()]
+    if missing_files:
+        raise ValueError("以下输入文件不存在：{0}".format("、".join(missing_files)))
+    file_paths = [str(path.resolve()) for path in requested_files]
     if file_paths:
         filenames = [Path(item).name for item in file_paths]
         total_files = len(file_paths)
     else:
+        scan_result = scan_folder(folder_path)
         filenames = list(scan_result.files)
         file_paths = [os.path.join(folder_path, name) for name in filenames]
         total_files = scan_result.file_count
@@ -322,10 +357,15 @@ def read_source_records(
                 }
             )
 
-        effective_type = file_type
-        if input_files:
-            suffix = Path(file_path).suffix.lower()
-            effective_type = "excel" if suffix in {".xlsx", ".xlsm", ".xls"} else "csv" if suffix == ".csv" else "xliff"
+        suffix = Path(file_path).suffix.lower()
+        if suffix in {".xlsx", ".xlsm", ".xls"}:
+            effective_type = "excel"
+        elif suffix == ".csv":
+            effective_type = "csv"
+        elif suffix in {".xlf", ".xliff"}:
+            effective_type = "xliff"
+        else:
+            raise ValueError("不支持的输入文件类型：{0}".format(filename))
         current_mapping = None
         if file_mappings and (file_path in file_mappings or filename in file_mappings):
             current_mapping = file_mappings.get(file_path, file_mappings.get(filename, {}))

@@ -578,8 +578,27 @@ class TermExtractionService:
         self.settings.input_defaults["extraction_mode"] = task_input.extraction_mode
         sync_extraction_flags(self.settings.input_defaults)
 
-        scan_result = scan_folder(task_input.folder_path)
-        task_input.file_type = scan_result.file_type
+        explicit_files = [str(Path(item).expanduser().resolve()) for item in task_input.input_files if str(item).strip()]
+        if explicit_files:
+            missing_files = [item for item in explicit_files if not Path(item).is_file()]
+            if missing_files:
+                raise ValueError("以下输入文件不存在：{0}".format("、".join(missing_files)))
+            task_input.input_files = explicit_files
+            input_file_count = len(explicit_files)
+            detected_types = {
+                "excel" if Path(item).suffix.lower() in {".xlsx", ".xlsm", ".xls"}
+                else "csv" if Path(item).suffix.lower() == ".csv"
+                else "xliff" if Path(item).suffix.lower() in {".xlf", ".xliff"}
+                else "unsupported"
+                for item in explicit_files
+            }
+            if "unsupported" in detected_types:
+                raise ValueError("输入文件中包含不支持的格式。")
+            task_input.file_type = next(iter(detected_types)) if len(detected_types) == 1 else "mixed"
+        else:
+            scan_result = scan_folder(task_input.folder_path)
+            task_input.file_type = scan_result.file_type
+            input_file_count = scan_result.file_count
         runtime.input_config = task_input.to_dict()
         runtime.provider_name = provider_name
         runtime.model_name = provider_settings.model
@@ -587,14 +606,14 @@ class TermExtractionService:
         source_records = source_records_from_runtime(runtime.source_records)
         if not source_records:
             runtime.stage = "READING_FILES"
-            runtime.stats["progress_total"] = scan_result.file_count
+            runtime.stats["progress_total"] = input_file_count
             runtime.stats["progress_current"] = 0
             self.runtime_store.save(runtime)
             self._emit_progress(runtime, message="开始读取输入文件。")
 
             source_records, processed_files = read_source_records(
                 folder_path=task_input.folder_path,
-                file_type=scan_result.file_type,
+                file_type=task_input.file_type,
                 header_name=task_input.header_name,
                 sheet_selections=task_input.column_selections,
                 input_files=task_input.input_files,

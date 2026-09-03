@@ -17,6 +17,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from openpyxl.utils import get_column_letter
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
@@ -85,7 +86,7 @@ if __package__:
         test_chat as test_ai_review_chat,
     )
     from .constants import APP_VERSION, UPDATE_ASSET_NAME_HINTS, UPDATE_RELEASE_API
-    from .core import scan_folder
+    from .core import read_excel_header_metadata, scan_folder
     from .cross_excel import merge_excel_files_by_headers, scan_cross_excel_folder, search_excel_rows
     from .diff_excel import (
         DiffRecord as DiffExcelRecord,
@@ -190,7 +191,7 @@ else:
         test_chat as test_ai_review_chat,
     )
     from term_extractor_app.constants import APP_VERSION, UPDATE_ASSET_NAME_HINTS, UPDATE_RELEASE_API
-    from term_extractor_app.core import scan_folder
+    from term_extractor_app.core import read_excel_header_metadata, scan_folder
     from term_extractor_app.cross_excel import (
         merge_excel_files_by_headers,
         scan_cross_excel_folder,
@@ -1496,15 +1497,35 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             path = Path(file_path).expanduser().resolve()
             if not path.is_file():
                 raise ValueError("文件不存在")
-            if path.suffix.lower() in {".xlsx", ".xlsm"}:
-                metadata = read_ai_review_excel_headers(path)
+            if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+                metadata = read_excel_header_metadata(path)
             elif path.suffix.lower() == ".csv":
                 with path.open("r", encoding="utf-8-sig", newline="") as handle:
                     headers = next(csv.reader(handle), [])
-                metadata = {"sheet_names": ["CSV"], "columns_by_sheet": {"CSV": [{"letter": chr(65 + i), "header": h} for i, h in enumerate(headers) if h.strip()]}}
+                metadata = {"sheet_names": ["CSV"], "columns_by_sheet": {"CSV": [{"index": i, "letter": get_column_letter(i + 1), "header": h.strip()} for i, h in enumerate(headers) if h.strip()]}}
             else:
                 metadata = {"sheet_names": [], "columns_by_sheet": {}}
             return {"file_name": path.name, "file_path": str(path), "file_type": "excel" if metadata.get("sheet_names") else path.suffix.lower().lstrip("."), **metadata}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/preprocess/folder-files")
+    async def preprocess_folder_files(folder_path: str):
+        try:
+            folder = Path(folder_path).expanduser().resolve()
+            if not folder.is_dir():
+                raise ValueError("文件夹路径无效。")
+            supported_suffixes = {".xlsx", ".xlsm", ".xls", ".csv", ".xlf", ".xliff"}
+            paths = sorted(
+                str(path.resolve())
+                for path in folder.iterdir()
+                if path.is_file()
+                and not path.name.startswith("~$")
+                and path.suffix.lower() in supported_suffixes
+            )
+            if not paths:
+                raise ValueError("所选文件夹里没有可处理的 Excel、CSV 或 XLIFF 文件。")
+            return {"folder_path": str(folder), "file_paths": paths, "file_count": len(paths)}
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1697,6 +1718,30 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         paths = [str(path) for path in selected if str(path)]
+        return {"file_paths": paths, "cancelled": not bool(paths)}
+
+    @app.post("/api/dialog/select-preprocess-files")
+    async def select_preprocess_files():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected = filedialog.askopenfilenames(
+                title="选择待提取文件",
+                filetypes=[
+                    ("支持的文件", "*.xlsx *.xlsm *.xls *.csv *.xlf *.xliff"),
+                    ("Excel 文件", "*.xlsx *.xlsm *.xls"),
+                    ("CSV 文件", "*.csv"),
+                    ("XLIFF 文件", "*.xlf *.xliff"),
+                ],
+            )
+            root.destroy()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        paths = [str(Path(path).resolve()) for path in selected if str(path)]
         return {"file_paths": paths, "cancelled": not bool(paths)}
 
     @app.post("/api/ai-review/file/open")
@@ -2116,6 +2161,22 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         settings = task_facade.load_settings()
         task_input = None
         if not payload.resume:
+            explicit_files = [Path(item).expanduser().resolve() for item in payload.input_files if str(item).strip()]
+            if explicit_files:
+                missing_files = [str(path) for path in explicit_files if not path.is_file()]
+                if missing_files:
+                    raise HTTPException(status_code=400, detail="以下输入文件不存在：{0}".format("、".join(missing_files)))
+                unsupported_files = [path.name for path in explicit_files if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv", ".xlf", ".xliff"}]
+                if unsupported_files:
+                    raise HTTPException(status_code=400, detail="包含不支持的文件：{0}".format("、".join(unsupported_files)))
+                for path in explicit_files:
+                    if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
+                        continue
+                    mapping = payload.file_mappings.get(str(path), payload.file_mappings.get(path.name, {}))
+                    if not any(values for values in mapping.values() if values):
+                        raise HTTPException(status_code=400, detail="请先配置文件映射：{0}".format(path.name))
+            elif not str(payload.folder_path or "").strip():
+                raise HTTPException(status_code=400, detail="请先选择文件或文件夹。")
             task_input = TaskInput(
                 folder_path=payload.folder_path,
                 header_name=payload.header_name,
@@ -2351,18 +2412,18 @@ INDEX_HTML = """<!doctype html>
           <section class="card">
             <div class="card-title">
               <h3>新建任务</h3>
-              <p>选择目录和模式。</p>
+              <p>选择文件或文件夹，完成列映射后开始提取。</p>
             </div>
             <div class="preprocess-task-grid">
               <div class="preprocess-file-pane">
-                <label>输入目录<span class="secret-field"><input id="folderPath" placeholder="D:\\项目\\文本表" /><button id="chooseFolderButton" class="mini-button" type="button">选择文件夹</button><button id="addPreprocessFilesButton" class="mini-button" type="button">选择文件</button><input id="preprocessFileInput" type="file" multiple accept=".xlsx,.xlsm,.csv,.xlf,.xliff" class="visually-hidden" /></span></label>
+                <label>文件<span class="secret-field"><input id="folderPath" placeholder="选择文件或文件夹" readonly /><button id="addPreprocessFilesButton" class="mini-button" type="button">选择文件</button><button id="chooseFolderButton" class="mini-button" type="button">选择文件夹</button></span></label>
                 <div id="preprocessFileSummary" class="preprocess-file-summary" aria-live="polite">尚未添加文件</div>
                 <div id="preprocessFileList" class="preprocess-file-list" aria-live="polite"><span class="hint">尚未添加文件</span></div>
               </div>
               <div class="preprocess-settings-pane">
                 <label>源语言<span class="secret-field"><button id="preprocessSourceLanguageChip" class="secondary" type="button">源语言：自动检测</button><select id="sourceLanguage" class="visually-hidden"><option value="auto">自动检测</option><option value="zho-CN">简体中文</option><option value="zho-TW">繁体中文</option><option value="eng">英语</option><option value="jpn">日语</option><option value="kor">韩语</option><option value="fra">法语</option><option value="deu">德语</option><option value="spa">西班牙语</option><option value="por">葡萄牙语</option><option value="ita">意大利语</option><option value="rus">俄语</option></select></span></label>
                 <label>运行模式<select id="extractionMode"><option value="terms">提取术语</option><option value="nontrans_only">仅提取非译元素</option></select></label>
-                <div class="actions"><button id="scanButton" class="secondary">扫描目录</button><button id="preprocessTermBaseChip" class="secondary" type="button">术语表</button><button id="startButton" class="primary">开始提取</button></div>
+                <div class="actions"><button id="preprocessTermBaseChip" class="secondary" type="button">术语表</button><button id="startButton" class="primary" disabled>开始提取</button></div>
               </div>
             </div>
             <div id="preprocessTermBasePopover" class="review-term-base-popover hidden" role="menu" aria-label="选择术语库">
@@ -2373,7 +2434,7 @@ INDEX_HTML = """<!doctype html>
               <div class="review-term-base-search"><input id="preprocessSourceLanguageSearch" type="search" placeholder="搜索源语言" autocomplete="off" /></div>
               <div id="preprocessSourceLanguageOptions" class="review-term-base-options"></div>
             </div>
-            <pre id="scanResult" class="result-box">尚未扫描</pre>
+            <div id="preprocessTaskHint" class="inline-task-hint" role="status" aria-live="polite">请选择文件或文件夹。</div>
           </section>
 
           <section class="card preprocess-progress-card">
@@ -3363,6 +3424,7 @@ INDEX_HTML = """<!doctype html>
       <div class="field"><label for="preprocessMappingSourceLanguage">源语言</label><select id="preprocessMappingSourceLanguage"><option value="auto">自动检测</option><option value="zho-CN">简体中文</option><option value="zho-TW">繁体中文</option><option value="eng">英语</option><option value="jpn">日语</option><option value="kor">韩语</option><option value="fra">法语</option><option value="deu">德语</option><option value="spa">西班牙语</option><option value="por">葡萄牙语</option><option value="ita">意大利语</option><option value="rus">俄语</option></select></div>
       <div class="mapping-template-bar"><label for="preprocessMappingTemplateSelect">映射模板</label><select id="preprocessMappingTemplateSelect"><option value="">选择模板</option></select><button id="applyPreprocessTemplateButton" class="secondary" type="button">调用模板</button><button id="deletePreprocessTemplateButton" class="mapping-template-delete" type="button" aria-label="删除模板">×</button></div>
       <div id="preprocessMappingSheetTabs" class="sheet-tabs"></div><div id="preprocessMappingColumns" class="excel-mapping-columns"></div>
+      <div id="preprocessMappingHint" class="inline-task-hint" role="status" aria-live="polite"></div>
       <div class="dialog-actions"><button id="savePreprocessMappingButton" class="secondary" type="button">保存模板</button><button id="applyPreprocessToButton" class="secondary" type="button">应用到</button><button id="applyPreprocessMappingButton" type="button">确认选择</button><button id="cancelPreprocessMappingButton" class="secondary" type="button">取消</button></div>
     </form>
   </dialog>
@@ -5169,6 +5231,8 @@ dialog.modal::backdrop { background: rgba(20, 31, 48, .38); backdrop-filter: blu
 .preprocess-file-item:hover, .preprocess-file-item.active { border-color: var(--accent); background: rgba(93,141,255,.14); }
 .preprocess-file-item strong, .preprocess-file-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preprocess-file-item small { color: var(--muted); }
+.inline-task-hint { min-height: 22px; margin-top: 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.inline-task-hint.is-error { color: #f69a9a; }
 .review-language-option.selected .review-language-check { visibility: visible; }
 .review-term-base-chip { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-term-base-popover { position: absolute; z-index: 62; bottom: 56px; left: 14px; width: min(410px, calc(100% - 28px)); max-height: 390px; overflow: hidden auto; padding: 7px; border: 1px solid #d9e1ea; border-radius: 14px; background: #fff; box-shadow: 0 18px 50px rgba(29,43,68,.18); }
@@ -6278,7 +6342,6 @@ let latestResultFile = "";
 let availableModels = [];
 let currentProviderName = "DeepSeek";
 let currentBaseUrl = "";
-let lastScanResult = null;
 let crossExcelScanState = null;
 let crossExcelSearchState = null;
 let crossExcelOutputFile = "";
@@ -6826,25 +6889,6 @@ function setHeaderOptions(headers, preferredValue = "") {
     }
     select.appendChild(option);
   });
-}
-
-function applyScanResult(data) {
-  lastScanResult = data || null;
-  if (Array.isArray(data?.files) && data.files.length) {
-    const folder = $("folderPath").value.trim().replace(/[\\/]$/, "");
-    preprocessFiles = data.files.map((name) => ({ path: `${folder}/${name}`, name, mapped: false, selected: {} }));
-    preprocessActiveFile = preprocessFiles[0] || null;
-    renderPreprocessFiles();
-  }
-  $("scanResult").textContent = JSON.stringify(data, null, 2);
-
-  if ((data?.file_type || "") === "xliff") {
-    preprocessMappingState = { sheetNames: [], columnsBySheet: {}, selected: {}, activeSheet: "" };
-    $("preprocessFileSummary").textContent = "XLIFF source";
-    return;
-  }
-
-  $("preprocessFileSummary").textContent = "扫描后选择文件";
 }
 
 function setCrossExcelHeaderSelection(selected) {
@@ -10488,22 +10532,6 @@ async function saveBuiltinRules() {
   await loadBuiltinRules();
 }
 
-async function scanFolder() {
-  const folder = $("folderPath").value.trim();
-  if (!folder) {
-    $("scanResult").textContent = "请先填写输入目录";
-    return;
-  }
-  try {
-    const data = await api(`/api/scan?folder_path=${encodeURIComponent(folder)}`);
-    applyScanResult(data);
-  } catch (error) {
-    lastScanResult = null;
-    $("preprocessFileSummary").textContent = "扫描后选择文件";
-    $("scanResult").textContent = error.message;
-  }
-}
-
 async function chooseFolder() {
   try {
     const data = await api("/api/dialog/select-folder", {
@@ -10514,9 +10542,10 @@ async function chooseFolder() {
       return;
     }
     $("folderPath").value = data.folder_path;
-    await scanFolder();
+    const result = await api(`/api/preprocess/folder-files?folder_path=${encodeURIComponent(data.folder_path)}`);
+    replacePreprocessFiles(result.file_paths || [], data.folder_path);
   } catch (error) {
-    $("scanResult").textContent = error.message;
+    setPreprocessTaskHint(error.message, true);
   }
 }
 
@@ -10867,11 +10896,23 @@ async function highlightDiffExcel() {
 }
 
 async function startTask() {
-  const selectedHeaders = Object.values(preprocessMappingState.selected).flat().filter(Boolean);
+  if (!preprocessFiles.length) {
+    setPreprocessTaskHint("请先选择文件或文件夹。", true);
+    return;
+  }
+  const pendingFiles = preprocessFiles.filter((file) => preprocessFileRequiresMapping(file) && !file.mapped);
+  if (pendingFiles.length) {
+    setPreprocessTaskHint(`请先完成映射：${pendingFiles.map((file) => file.name).join("、")}`, true);
+    return;
+  }
+  const allMappings = Object.fromEntries(preprocessFiles.map((file) => [file.path, file.selected || {}]));
+  const selectedHeaders = Object.values(allMappings).flatMap((mapping) => Object.values(mapping || {}).flat()).filter(Boolean);
+  const firstPath = preprocessFiles[0]?.path || "";
+  const inputFolder = firstPath.replace(/[\\/][^\\/]+$/, "") || $("folderPath").value.trim();
   const payload = {
-    folder_path: $("folderPath").value.trim(),
+    folder_path: inputFolder,
     header_name: selectedHeaders,
-    source_language: $("sourceLanguage").value.trim() || "中文",
+    source_language: $("sourceLanguage").value.trim() || "auto",
     file_type: "",
     export_review_sheet: true,
     extraction_mode: $("extractionMode").value,
@@ -10879,16 +10920,19 @@ async function startTask() {
     batch_request_char_limit: Number($("recallLimit").value || 3000),
     resume: false,
     memoq_term_base_ids: preprocessTermBaseIds || [],
-    column_selections: preprocessMappingState.selected || {},
+    column_selections: {},
     input_files: preprocessFiles.map((file) => file.path),
-    file_mappings: Object.fromEntries(preprocessFiles.map((file) => [file.path, file.selected || {}])),
+    file_mappings: allMappings,
   };
   $("errorPanel").hidden = true;
+  $("startButton").disabled = true;
+  setPreprocessTaskHint("正在提交提取任务…", false);
   await saveSettings();
   await api("/api/tasks/start", {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  setPreprocessTaskHint("任务已开始，可在下方查看进度。", false);
   await refreshStatus();
 }
 
@@ -10985,8 +11029,10 @@ async function choosePreprocessTermBases() {
   const popover = $("preprocessTermBasePopover");
   if (!status.memoq?.bound) {
     $("preprocessTermBaseOptions").innerHTML = '<div class="hint">请先在“设置”中绑定 memoQ 账号</div>';
-    popover.classList.remove("hidden");
-    $("preprocessTermBaseChip").closest(".card")?.classList.add("popover-open");
+    popover.classList.toggle("hidden");
+    const visible = !popover.classList.contains("hidden");
+    $("preprocessTermBaseChip").closest(".card")?.classList.toggle("popover-open", visible);
+    if (visible) positionPreprocessPopover(popover, $("preprocessTermBaseChip"));
     return;
   }
   const data = await api(`/api/ai-review/term-bases/memoq/termbases?q=${encodeURIComponent($("preprocessTermBaseSearch").value || "")}`);
@@ -11001,30 +11047,118 @@ async function choosePreprocessTermBases() {
 
 async function openPreprocessMappingDialog() {
   if (!preprocessActiveFile) throw new Error("请先添加文件");
+  if (!preprocessFileRequiresMapping(preprocessActiveFile)) {
+    setPreprocessTaskHint("XLIFF 文件无需配置列映射，可直接开始提取。", false);
+    return;
+  }
   const data = await api(`/api/preprocess/file-mapping-scan?file_path=${encodeURIComponent(preprocessActiveFile.path)}`);
   preprocessMappingState.sheetNames = data.sheet_names || [];
   preprocessMappingState.columnsBySheet = data.columns_by_sheet || {};
   preprocessMappingState.selected = preprocessActiveFile?.selected || {};
-  preprocessMappingState.activeSheet = preprocessMappingState.activeSheet || preprocessMappingState.sheetNames[0] || "";
+  if (!preprocessMappingState.sheetNames.includes(preprocessMappingState.activeSheet)) {
+    preprocessMappingState.activeSheet = preprocessMappingState.sheetNames[0] || "";
+  }
+  if (!preprocessMappingState.activeSheet) throw new Error("没有读取到可映射的工作表或列。");
   $("preprocessMappingSourceLanguage").value = $("sourceLanguage").value || "auto";
-  const tabs = $("preprocessMappingSheetTabs"); tabs.innerHTML = "";
-  preprocessMappingState.sheetNames.forEach((sheet) => { const b = document.createElement("button"); b.type = "button"; b.className = "sheet-tab" + (sheet === preprocessMappingState.activeSheet ? " active" : ""); b.textContent = sheet; b.title = sheet; b.onclick = () => { capturePreprocessActiveSheetSelection(); preprocessMappingState.activeSheet = sheet; openPreprocessMappingDialog().catch(() => undefined); }; tabs.appendChild(b); });
+  $("preprocessMappingHint").textContent = "";
+  $("preprocessMappingHint").classList.remove("is-error");
+  renderPreprocessMappingSheetTabs();
   renderPreprocessMappingColumns();
-  $("preprocessMappingDialog").showModal();
+  if (!$("preprocessMappingDialog").open) $("preprocessMappingDialog").showModal();
 }
 
+function preprocessFileKind(path) {
+  const suffix = String(path || "").toLowerCase().match(/\.[^.\\/]+$/)?.[0] || "";
+  if ([".xlsx", ".xlsm", ".xls"].includes(suffix)) return "excel";
+  if (suffix === ".csv") return "csv";
+  if ([".xlf", ".xliff"].includes(suffix)) return "xliff";
+  return "unsupported";
+}
+function preprocessFileRequiresMapping(file) { return ["excel", "csv"].includes(file?.kind || preprocessFileKind(file?.path)); }
+function createPreprocessFile(path) {
+  const normalizedPath = String(path || "");
+  const kind = preprocessFileKind(normalizedPath);
+  return { path: normalizedPath, name: normalizedPath.split(/[\\/]/).pop(), kind, mapped: kind === "xliff", selected: {}, sheetCount: 0 };
+}
+function setPreprocessTaskHint(message, isError = false) {
+  const hint = $("preprocessTaskHint");
+  hint.textContent = message || "";
+  hint.classList.toggle("is-error", Boolean(isError));
+}
+function updatePreprocessWorkflowState(message = "") {
+  const pending = preprocessFiles.filter((file) => preprocessFileRequiresMapping(file) && !file.mapped);
+  $("startButton").disabled = !preprocessFiles.length || pending.length > 0;
+  if (message) {
+    setPreprocessTaskHint(message, false);
+  } else if (!preprocessFiles.length) {
+    setPreprocessTaskHint("请选择文件或文件夹。", false);
+  } else if (pending.length) {
+    setPreprocessTaskHint(`请点击文件配置映射，还剩 ${pending.length} 个文件。`, false);
+  } else {
+    setPreprocessTaskHint(`已准备 ${preprocessFiles.length} 个文件，可以开始提取。`, false);
+  }
+}
+function replacePreprocessFiles(paths, displayPath = "") {
+  const uniquePaths = [...new Set((paths || []).map((path) => String(path || "")).filter(Boolean))];
+  preprocessFiles = uniquePaths.map(createPreprocessFile).filter((file) => file.kind !== "unsupported");
+  preprocessActiveFile = preprocessFiles[0] || null;
+  preprocessMappingState = { sheetNames: [], columnsBySheet: {}, selected: {}, activeSheet: "" };
+  $("folderPath").value = displayPath || (preprocessFiles.length === 1 ? preprocessFiles[0].path : preprocessFiles.length ? `${preprocessFiles.length} 个文件` : "");
+  renderPreprocessFiles();
+}
 function renderPreprocessFiles() {
   const box = $("preprocessFileList"); box.replaceChildren();
-  if (!preprocessFiles.length) { box.innerHTML = '<span class="hint">尚未添加文件</span>'; $("preprocessFileSummary").textContent = "尚未添加文件"; return; }
-  preprocessFiles.forEach((file) => { const row = document.createElement("button"); row.type = "button"; row.className = "preprocess-file-item" + (file === preprocessActiveFile ? " active" : ""); row.innerHTML = `<strong>${escapeHtml(file.name)}</strong><small>${file.mapped ? `${file.sheetCount || 0} 个工作表已配置` : "待配置映射"}</small>`; row.onclick = () => { preprocessActiveFile = file; renderPreprocessFiles(); openPreprocessMappingDialog().catch((error) => { $("scanResult").textContent = error.message; }); }; box.appendChild(row); });
-  $("preprocessFileSummary").textContent = `${preprocessFiles.length} 个文件${preprocessFiles.filter((f) => f.mapped).length ? ` · ${preprocessFiles.filter((f) => f.mapped).length} 个已映射` : ""}`;
+  if (!preprocessFiles.length) {
+    box.innerHTML = '<span class="hint">尚未添加文件</span>';
+    $("preprocessFileSummary").textContent = "尚未添加文件";
+    updatePreprocessWorkflowState();
+    return;
+  }
+  preprocessFiles.forEach((file) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "preprocess-file-item" + (file === preprocessActiveFile ? " active" : "");
+    const status = preprocessFileRequiresMapping(file)
+      ? (file.mapped ? `${file.sheetCount || 0} 个工作表已配置` : "点击配置映射")
+      : "无需配置映射";
+    row.innerHTML = `<strong>${escapeHtml(file.name)}</strong><small>${status}</small>`;
+    row.onclick = () => {
+      preprocessActiveFile = file;
+      renderPreprocessFiles();
+      openPreprocessMappingDialog().catch((error) => setPreprocessTaskHint(error.message, true));
+    };
+    box.appendChild(row);
+  });
+  const readyCount = preprocessFiles.filter((file) => !preprocessFileRequiresMapping(file) || file.mapped).length;
+  $("preprocessFileSummary").textContent = `${preprocessFiles.length} 个文件 · ${readyCount} 个已就绪`;
+  updatePreprocessWorkflowState();
 }
 async function addPreprocessFiles() {
-  const data = await api("/api/dialog/select-review-files");
+  const data = await api("/api/dialog/select-preprocess-files", { method: "POST", body: "{}" });
   const paths = Array.isArray(data.file_paths) ? data.file_paths.filter(Boolean) : [];
-  paths.forEach((path) => { if (!preprocessFiles.some((f) => f.path === path)) preprocessFiles.push({ path, name: String(path).split(/[\\/]/).pop(), mapped: false, selected: {} }); });
+  if (!paths.length) return;
+  paths.forEach((path) => { if (!preprocessFiles.some((f) => f.path === path)) preprocessFiles.push(createPreprocessFile(path)); });
   if (!preprocessActiveFile) preprocessActiveFile = preprocessFiles[0] || null;
+  $("folderPath").value = preprocessFiles.length === 1 ? preprocessFiles[0].path : `${preprocessFiles.length} 个文件`;
   renderPreprocessFiles();
+}
+
+function renderPreprocessMappingSheetTabs() {
+  const tabs = $("preprocessMappingSheetTabs"); tabs.replaceChildren();
+  preprocessMappingState.sheetNames.forEach((sheet) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sheet-tab" + (sheet === preprocessMappingState.activeSheet ? " active" : "");
+    button.textContent = sheet;
+    button.title = sheet;
+    button.onclick = () => {
+      capturePreprocessActiveSheetSelection();
+      preprocessMappingState.activeSheet = sheet;
+      renderPreprocessMappingSheetTabs();
+      renderPreprocessMappingColumns();
+    };
+    tabs.appendChild(button);
+  });
 }
 
 function applyPreprocessMappingDialog() {
@@ -11034,13 +11168,17 @@ function applyPreprocessMappingDialog() {
   const languageLabel = preprocessLanguages.find(([value]) => value === $("sourceLanguage").value)?.[1] || "自动检测";
   $("preprocessSourceLanguageChip").textContent = `源语言：${languageLabel}`;
   const count = Object.values(preprocessMappingState.selected).flat().filter(Boolean).length;
+  if (!count) {
+    $("preprocessMappingHint").textContent = "请至少选择一个待提取列。";
+    $("preprocessMappingHint").classList.add("is-error");
+    return;
+  }
   if (preprocessActiveFile) {
     preprocessActiveFile.selected = preprocessMappingState.selected;
     preprocessActiveFile.mapped = count > 0;
     preprocessActiveFile.sheetCount = Object.values(preprocessMappingState.selected).filter((items) => items?.length).length;
   }
   renderPreprocessFiles();
-  $("preprocessFileSummary").textContent = count ? `${count} 列（${Object.keys(preprocessMappingState.selected).filter((key) => preprocessMappingState.selected[key]?.length).length} 个工作表）` : "尚未选择";
   $("preprocessMappingDialog").close();
 }
 function preprocessMappingTemplateKey() { return "yeehe_preprocess_mapping_templates_v1"; }
@@ -11188,7 +11326,8 @@ async function refreshStatus() {
   $("errorPanel").hidden = !data.last_error;
   $("errorPanelText").textContent = data.last_error || "";
   $("logBox").textContent = (data.logs && data.logs.length) ? data.logs.join("\n") : "暂无日志";
-  $("startButton").disabled = Boolean(data.is_running);
+  const hasPendingMappings = preprocessFiles.some((file) => preprocessFileRequiresMapping(file) && !file.mapped);
+  $("startButton").disabled = Boolean(data.is_running) || !preprocessFiles.length || hasPendingMappings;
   $("resumeButton").disabled = Boolean(data.is_running) || !data.can_resume;
   $("stopButton").disabled = !data.is_running;
   $("clearCacheButton").disabled = Boolean(data.is_running) || !data.can_resume;
@@ -11231,9 +11370,9 @@ async function bindMemoQAccount() {
   } finally { $("bindMemoQButton").disabled = false; }
 }
 $("saveModelConnectionButton").addEventListener("click", saveModelConnection);
-$("preprocessTermBaseChip").addEventListener("click", () => choosePreprocessTermBases().catch((error) => { $("scanResult").textContent = error.message; }));
+$("preprocessTermBaseChip").addEventListener("click", () => choosePreprocessTermBases().catch((error) => setPreprocessTaskHint(error.message, true)));
 $("preprocessTermBaseSearch").addEventListener("input", renderPreprocessTermBases);
-$("preprocessSourceLanguageChip").addEventListener("click", () => { renderPreprocessLanguages(); const popover = $("preprocessSourceLanguagePopover"); popover.classList.toggle("hidden"); const visible = !popover.classList.contains("hidden"); $("preprocessSourceLanguageChip").closest(".card")?.classList.toggle("popover-open", visible); if (visible) positionPreprocessPopover(popover, $("preprocessSourceLanguageChip")); $("preprocessSourceLanguageSearch").focus(); });
+$("preprocessSourceLanguageChip").addEventListener("click", () => { renderPreprocessLanguages(); const popover = $("preprocessSourceLanguagePopover"); popover.classList.toggle("hidden"); const visible = !popover.classList.contains("hidden"); $("preprocessSourceLanguageChip").closest(".card")?.classList.toggle("popover-open", visible); if (visible) { positionPreprocessPopover(popover, $("preprocessSourceLanguageChip")); $("preprocessSourceLanguageSearch").focus(); } });
 $("preprocessSourceLanguageSearch").addEventListener("input", renderPreprocessLanguages);
 document.addEventListener("pointerdown", (event) => {
   const langPopover = $("preprocessSourceLanguagePopover");
@@ -11243,8 +11382,7 @@ document.addEventListener("pointerdown", (event) => {
   const termChip = $("preprocessTermBaseChip");
   if (!termPopover.classList.contains("hidden") && !termPopover.contains(event.target) && !termChip.contains(event.target)) { termPopover.classList.add("hidden"); termChip.closest(".card")?.classList.remove("popover-open"); }
 });
-$("addPreprocessFilesButton").addEventListener("click", () => addPreprocessFiles().catch((error) => { $("scanResult").textContent = error.message; }));
-$("preprocessFileInput").addEventListener("change", () => { $("scanResult").textContent = "请使用“添加文件”选择本地文件，以便保留原始路径。"; });
+$("addPreprocessFilesButton").addEventListener("click", () => addPreprocessFiles().catch((error) => setPreprocessTaskHint(error.message, true)));
 $("applyPreprocessMappingButton").addEventListener("click", applyPreprocessMappingDialog);
 $("savePreprocessMappingButton").addEventListener("click", savePreprocessMappingTemplate);
 $("applyPreprocessTemplateButton").addEventListener("click", applyPreprocessTemplate);
@@ -11289,7 +11427,6 @@ $("chooseDiffFileAButton").addEventListener("click", () => chooseDiffFile("A").c
 $("chooseDiffFileBButton").addEventListener("click", () => chooseDiffFile("B").catch((error) => {
   $("diffExcelHint").textContent = error.message;
 }));
-$("scanButton").addEventListener("click", scanFolder);
 $("scanCrossExcelButton").addEventListener("click", scanCrossExcelFolder);
 $("searchCrossExcelButton").addEventListener("click", searchCrossExcel);
 $("mergeCrossExcelButton").addEventListener("click", mergeCrossExcel);
@@ -11585,7 +11722,10 @@ $("reviewFollowupInput").addEventListener("keydown", (event) => {
     });
   }
 });
-$("startButton").addEventListener("click", startTask);
+$("startButton").addEventListener("click", () => startTask().catch((error) => {
+  setPreprocessTaskHint(error.message, true);
+  $("startButton").disabled = preprocessFiles.some((file) => preprocessFileRequiresMapping(file) && !file.mapped) || !preprocessFiles.length;
+}));
 $("resumeButton").addEventListener("click", resumeTask);
 $("stopButton").addEventListener("click", stopTask);
 $("clearCacheButton").addEventListener("click", clearRuntimeCache);
