@@ -597,6 +597,8 @@ class TermExtractionService:
                 file_type=scan_result.file_type,
                 header_name=task_input.header_name,
                 sheet_selections=task_input.column_selections,
+                input_files=task_input.input_files,
+                file_mappings=task_input.file_mappings,
                 progress_callback=lambda payload: self._on_read_progress(runtime, payload),
             )
             runtime.source_records = [item.to_dict() for item in source_records]

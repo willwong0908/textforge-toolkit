@@ -102,6 +102,8 @@ class TaskInput:
     extraction_mode: str = "terms"
     memoq_term_base_ids: List[str] = field(default_factory=list)
     column_selections: Dict[str, List[str]] = field(default_factory=dict)
+    input_files: List[str] = field(default_factory=list)
+    file_mappings: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -121,6 +123,8 @@ class TaskInput:
             extraction_mode=normalize_extraction_mode(data.get("extraction_mode", "terms")),
             memoq_term_base_ids=[str(x) for x in (data.get("memoq_term_base_ids") or []) if str(x).strip()],
             column_selections={str(k): [str(x) for x in (v or []) if str(x).strip()] for k, v in (data.get("column_selections") or {}).items()},
+            input_files=[str(x) for x in (data.get("input_files") or []) if str(x).strip()],
+            file_mappings={str(k): {str(sk): [str(x) for x in (sv or []) if str(x).strip()] for sk, sv in (v or {}).items()} for k, v in (data.get("file_mappings") or {}).items()},
         )
 
 

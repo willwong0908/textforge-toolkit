@@ -293,30 +293,49 @@ def read_source_records(
     file_type: str,
     header_name: str,
     sheet_selections: Optional[Dict[str, Sequence[str]]] = None,
+    input_files: Optional[Sequence[str]] = None,
+    file_mappings: Optional[Dict[str, Dict[str, Sequence[str]]]] = None,
     progress_callback: Optional[Callable[[Dict[str, object]], None]] = None,
 ) -> Tuple[List[SourceRecord], List[str]]:
     records: List[SourceRecord] = []
     processed_files: List[str] = []
     scan_result = scan_folder(folder_path)
     header_names = _normalize_header_names(header_name)
+    file_paths = [str(Path(item)) for item in (input_files or []) if Path(item).is_file()]
+    if file_paths:
+        filenames = [Path(item).name for item in file_paths]
+        total_files = len(file_paths)
+    else:
+        filenames = list(scan_result.files)
+        file_paths = [os.path.join(folder_path, name) for name in filenames]
+        total_files = scan_result.file_count
 
-    for index, filename in enumerate(scan_result.files, start=1):
-        file_path = os.path.join(folder_path, filename)
+    for index, (filename, file_path) in enumerate(zip(filenames, file_paths), start=1):
         if progress_callback:
             progress_callback(
                 {
                     "stage": "READING_FILES",
                     "current_file": filename,
                     "current": index,
-                    "total": scan_result.file_count,
+                    "total": total_files,
                     "message": "正在读取 {0}".format(filename),
                 }
             )
 
-        if file_type == "excel":
-            records.extend(_read_excel_records(file_path, header_names, sheet_selections))
-        elif file_type == "csv":
-            records.extend(_read_csv_records(file_path, header_names))
+        effective_type = file_type
+        if input_files:
+            suffix = Path(file_path).suffix.lower()
+            effective_type = "excel" if suffix in {".xlsx", ".xlsm", ".xls"} else "csv" if suffix == ".csv" else "xliff"
+        current_mapping = None
+        if file_mappings and (file_path in file_mappings or filename in file_mappings):
+            current_mapping = file_mappings.get(file_path, file_mappings.get(filename, {}))
+        elif sheet_selections is not None:
+            current_mapping = sheet_selections
+        current_headers = _normalize_header_names([h for values in (current_mapping or {}).values() for h in values]) if current_mapping is not None else header_names
+        if effective_type == "excel":
+            records.extend(_read_excel_records(file_path, current_headers, current_mapping))
+        elif effective_type == "csv":
+            records.extend(_read_csv_records(file_path, current_headers))
         else:
             records.extend(_read_xliff_records(file_path))
         processed_files.append(filename)
