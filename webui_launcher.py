@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import json
 import logging
 import os
 import socket
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 import webbrowser
 
 import uvicorn
@@ -83,10 +85,25 @@ def _is_port_open() -> bool:
         return sock.connect_ex((HOST, PORT)) == 0
 
 
+def _is_service_ready() -> bool:
+    try:
+        request = urllib.request.Request(
+            f"{URL}api/status",
+            headers={"Accept": "application/json", "User-Agent": "Yeehe-Toolkit-Launcher"},
+        )
+        with urllib.request.urlopen(request, timeout=1.0) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+        return isinstance(payload, dict) and "is_running" in payload and "stage" in payload
+    except Exception:
+        return False
+
+
 def _wait_until_ready(timeout_seconds: float = 20.0) -> bool:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        if _is_port_open():
+        if _is_service_ready():
             return True
         time.sleep(0.2)
     return False
@@ -146,10 +163,16 @@ def main() -> int:
     _print_banner()
 
     if _is_port_open():
-        _log_file("info", "Existing service detected on port %s", PORT)
-        threading.Thread(target=_open_browser_when_ready, kwargs={"existing_service": True}, daemon=True).start()
+        existing_service_ready = _is_service_ready()
+        if existing_service_ready:
+            _log_file("info", "Existing service detected on port %s", PORT)
+            threading.Thread(target=_open_browser_when_ready, kwargs={"existing_service": True}, daemon=True).start()
+        else:
+            _log_console(f"  启动失败：端口 {PORT} 已被其他程序占用，或旧服务没有正常响应。", level="error")
+            _log_console("  请关闭占用该端口的程序后重新启动。本工具不会打开无效页面。", level="error")
+            _print_idle_hint()
         _listen_for_quit(None)
-        return 0
+        return 0 if existing_service_ready else 2
 
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.error").setLevel(logging.WARNING)

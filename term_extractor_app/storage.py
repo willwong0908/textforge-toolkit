@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -689,13 +690,28 @@ class RuntimeCacheStore:
     def __init__(self, paths: Optional[AppPaths] = None):
         self.paths = paths or get_app_paths()
         ensure_directories(self.paths)
+        self._cache_lock = threading.RLock()
+        self._cached_file_key: Optional[tuple[int, int]] = None
+        self._cached_state: Optional[RuntimeTaskState] = None
 
     def load(self) -> Optional[RuntimeTaskState]:
         if not self.paths.runtime_cache_file.exists():
+            with self._cache_lock:
+                self._cached_file_key = None
+                self._cached_state = None
             return None
         try:
+            stat = self.paths.runtime_cache_file.stat()
+            file_key = (int(stat.st_mtime_ns), int(stat.st_size))
+            with self._cache_lock:
+                if file_key == self._cached_file_key and self._cached_state is not None:
+                    return self._cached_state
             raw = json.loads(self.paths.runtime_cache_file.read_text(encoding="utf-8"))
-            return RuntimeTaskState.from_dict(raw)
+            state = RuntimeTaskState.from_dict(raw)
+            with self._cache_lock:
+                self._cached_file_key = file_key
+                self._cached_state = state
+            return state
         except Exception:
             return None
 
@@ -703,6 +719,10 @@ class RuntimeCacheStore:
         state.cache_version = RUNTIME_CACHE_VERSION
         state.touch()
         atomic_write_json(self.paths.runtime_cache_file, state.to_dict())
+        stat = self.paths.runtime_cache_file.stat()
+        with self._cache_lock:
+            self._cached_file_key = (int(stat.st_mtime_ns), int(stat.st_size))
+            self._cached_state = state
 
     def exists(self) -> bool:
         return self.paths.runtime_cache_file.exists()
@@ -710,6 +730,9 @@ class RuntimeCacheStore:
     def clear(self) -> None:
         if self.paths.runtime_cache_file.exists():
             self.paths.runtime_cache_file.unlink()
+        with self._cache_lock:
+            self._cached_file_key = None
+            self._cached_state = None
 
     def summary(self) -> Optional[Dict[str, Any]]:
         state = self.load()

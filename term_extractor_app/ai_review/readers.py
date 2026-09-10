@@ -8,7 +8,7 @@ import re
 import zipfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 
 from openpyxl.utils import get_column_letter

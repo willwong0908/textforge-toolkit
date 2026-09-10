@@ -61,8 +61,11 @@ class ReviewWorkflowValidationTests(unittest.TestCase):
         without_terms = _build_user_prompt(config, "{}", False, False)
         with_terms = _build_user_prompt(config, "{}", False, True)
         self.assertNotIn("{term_review}", without_terms)
-        self.assertNotIn("术语表审校规则", without_terms)
-        self.assertIn("术语表审校规则", with_terms)
+        self.assertNotIn("术语表参考规则", without_terms)
+        self.assertIn("术语表参考规则", with_terms)
+        self.assertIn("只作为审校参考，不是强制替换规则", with_terms)
+        self.assertIn("不得仅因没有逐字采用 targets", with_terms)
+        self.assertIn("存在歧义时不要强行报错", with_terms)
 
     def test_term_pairs_are_deduplicated_once_at_package_level(self) -> None:
         pairs = [

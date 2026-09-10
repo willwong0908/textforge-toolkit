@@ -1028,6 +1028,10 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
     async def js() -> Response:
         return Response(APP_JS, media_type="application/javascript")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.get("/assets/logo.png")
     async def logo() -> FileResponse:
         try:
@@ -1473,7 +1477,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return {"ok": True, **prompt_templates_response(settings)}
 
     @app.get("/api/scan")
-    async def scan(folder_path: str):
+    def scan(folder_path: str):
         try:
             result = scan_folder(folder_path)
         except Exception as exc:
@@ -1481,7 +1485,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return result.to_dict()
 
     @app.get("/api/preprocess/mapping-scan")
-    async def preprocess_mapping_scan(folder_path: str):
+    def preprocess_mapping_scan(folder_path: str):
         try:
             result = scan_folder(folder_path)
             if result.file_type != "excel" or not result.files:
@@ -1492,7 +1496,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/preprocess/file-mapping-scan")
-    async def preprocess_file_mapping_scan(file_path: str):
+    def preprocess_file_mapping_scan(file_path: str):
         try:
             path = Path(file_path).expanduser().resolve()
             if not path.is_file():
@@ -1510,7 +1514,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/preprocess/folder-files")
-    async def preprocess_folder_files(folder_path: str):
+    def preprocess_folder_files(folder_path: str):
         try:
             folder = Path(folder_path).expanduser().resolve()
             if not folder.is_dir():
@@ -1530,7 +1534,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/dialog/select-folder")
-    async def select_folder():
+    def select_folder():
         try:
             folder_path = select_folder_dialog()
         except Exception as exc:
@@ -1538,14 +1542,14 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return {"folder_path": folder_path, "cancelled": not bool(folder_path)}
 
     @app.get("/api/cross-excel/scan")
-    async def cross_excel_scan(folder_path: str):
+    def cross_excel_scan(folder_path: str):
         try:
             return scan_cross_excel_folder(folder_path)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/cross-excel/search")
-    async def cross_excel_search(payload: CrossExcelSearchPayload):
+    def cross_excel_search(payload: CrossExcelSearchPayload):
         try:
             track_event("task_action.cross_excel_search")
             result = search_excel_rows(payload.folder_path, payload.query, payload.limit)
@@ -1554,7 +1558,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/cross-excel/merge")
-    async def cross_excel_merge(payload: CrossExcelMergePayload):
+    def cross_excel_merge(payload: CrossExcelMergePayload):
         try:
             track_event("task_action.cross_excel_merge")
             result = merge_excel_files_by_headers(
@@ -1612,14 +1616,14 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return task.to_dict()
 
     @app.get("/api/diff-excel/field-match-headers")
-    async def diff_excel_field_match_headers(path_a: str, path_b: str):
+    def diff_excel_field_match_headers(path_a: str, path_b: str):
         try:
             return scan_diff_excel_field_match_headers(path_a, path_b)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/diff-excel/export")
-    async def diff_excel_export(payload: DiffExcelExportPayload):
+    def diff_excel_export(payload: DiffExcelExportPayload):
         try:
             return export_diff_excel_cached_records(
                 payload.cache_file,
@@ -1630,7 +1634,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/diff-excel/highlight")
-    async def diff_excel_highlight(payload: DiffExcelHighlightPayload):
+    def diff_excel_highlight(payload: DiffExcelHighlightPayload):
         try:
             track_event("diff.highlight")
             changed_cells, workbook_count = apply_diff_excel_highlight_from_cache(
@@ -1650,14 +1654,14 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/diff-excel/preview")
-    async def diff_excel_preview(cache_file: str, query: str = "", limit: int = 200, offset: int = 0):
+    def diff_excel_preview(cache_file: str, query: str = "", limit: int = 200, offset: int = 0):
         try:
             return read_diff_excel_cached_preview(cache_file, query=query, limit=limit, offset=offset)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/diff-excel/open-cell")
-    async def diff_excel_open_cell(payload: DiffExcelOpenCellPayload):
+    def diff_excel_open_cell(payload: DiffExcelOpenCellPayload):
         file_path = str(payload.file_path or "").strip()
         sheet_name = str(payload.sheet_name or "").strip()
         cell_address = str(payload.cell_address or "").strip()
@@ -1676,76 +1680,59 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         }
 
     @app.get("/api/dialog/select-review-file")
-    async def select_review_file():
+    def select_review_file():
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            selected = filedialog.askopenfilename(
-                title="选择待审校文件",
-                filetypes=[
+            selected_paths = select_files_dialog(
+                "选择待审校文件",
+                [
                     ("支持的文件", "*.xlsx *.xlsm *.xlf *.xliff"),
                     ("Excel 文件", "*.xlsx *.xlsm"),
                     ("XLIFF 文件", "*.xlf *.xliff"),
                 ],
+                multiple=False,
             )
-            root.destroy()
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        selected = selected_paths[0] if selected_paths else ""
         return {"file_path": selected or "", "cancelled": not bool(selected)}
 
     @app.get("/api/dialog/select-review-files")
     @app.post("/api/dialog/select-review-files")
-    async def select_review_files():
+    def select_review_files():
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            selected = filedialog.askopenfilenames(
-                title="选择待审校文件",
-                filetypes=[
+            selected = select_files_dialog(
+                "选择待审校文件",
+                [
                     ("支持的文件", "*.xlsx *.xlsm *.xlf *.xliff *.csv *.tsv *.txt *.md *.docx *.pptx *.pdf *.json *.xml"),
                     ("所有文件", "*.*"),
                 ],
+                multiple=True,
             )
-            root.destroy()
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         paths = [str(path) for path in selected if str(path)]
         return {"file_paths": paths, "cancelled": not bool(paths)}
 
     @app.post("/api/dialog/select-preprocess-files")
-    async def select_preprocess_files():
+    def select_preprocess_files():
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            selected = filedialog.askopenfilenames(
-                title="选择待提取文件",
-                filetypes=[
+            selected = select_files_dialog(
+                "选择待提取文件",
+                [
                     ("支持的文件", "*.xlsx *.xlsm *.xls *.csv *.xlf *.xliff"),
                     ("Excel 文件", "*.xlsx *.xlsm *.xls"),
                     ("CSV 文件", "*.csv"),
                     ("XLIFF 文件", "*.xlf *.xliff"),
                 ],
+                multiple=True,
             )
-            root.destroy()
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         paths = [str(Path(path).resolve()) for path in selected if str(path)]
         return {"file_paths": paths, "cancelled": not bool(paths)}
 
     @app.post("/api/ai-review/file/open")
-    async def ai_review_open_file(payload: AIReviewOpenFilePayload):
+    def ai_review_open_file(payload: AIReviewOpenFilePayload):
         file_path = str(payload.file_path or "").strip()
         if not file_path:
             raise HTTPException(status_code=400, detail="请先选择文件。")
@@ -1756,7 +1743,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return {"ok": True, "file_path": file_path}
 
     @app.post("/api/ai-review/file/load")
-    async def ai_review_load_file(payload: AIReviewOpenFilePayload):
+    def ai_review_load_file(payload: AIReviewOpenFilePayload):
         file_path = Path(str(payload.file_path or "").strip())
         if not str(file_path):
             raise HTTPException(status_code=400, detail="请先选择文件。")
@@ -1916,7 +1903,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         }
 
     @app.post("/api/ai-review/ai/test")
-    async def ai_review_test_model():
+    def ai_review_test_model():
         settings = get_ai_review_shared_ai_settings()
         api_key = str(settings.get("api_key", "") or "")
         model = str(settings.get("selected_model", "") or "")
@@ -2138,7 +2125,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="追问发送失败：{0}".format(exc)) from exc
 
     @app.post("/api/ai-review/outputs/open-folder")
-    async def ai_review_open_outputs():
+    def ai_review_open_outputs():
         try:
             open_ai_review_directory(AI_REVIEW_OUTPUTS_DIR)
         except Exception as exc:
@@ -2146,7 +2133,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return {"ok": True, "message": "已打开结果目录", "path": str(AI_REVIEW_OUTPUTS_DIR)}
 
     @app.post("/api/ai-review/outputs/open-file")
-    async def ai_review_open_output_file(payload: AIReviewOpenFilePayload):
+    def ai_review_open_output_file(payload: AIReviewOpenFilePayload):
         file_path = str(payload.file_path or "").strip()
         if not file_path:
             raise HTTPException(status_code=400, detail="暂无可打开的结果文件。")
@@ -2224,7 +2211,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return task_facade.snapshot().to_dict()
 
     @app.get("/api/results/summary")
-    async def results_summary(output_file: Optional[str] = None):
+    def results_summary(output_file: Optional[str] = None):
         return task_facade.result_summary(output_file).to_dict()
 
     @app.get("/api/results/download")
@@ -2239,7 +2226,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         )
 
     @app.post("/api/results/open-folder")
-    async def open_result_folder(output_file: str):
+    def open_result_folder(output_file: str):
         path = Path(output_file)
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Output file does not exist.")
@@ -2250,7 +2237,7 @@ def create_app(facade: Optional[ExtractionTaskFacade] = None) -> FastAPI:
         return {"ok": True, "folder": str(path.parent)}
 
     @app.post("/api/results/open-file")
-    async def open_result_file(output_file: str):
+    def open_result_file(output_file: str):
         path = Path(output_file)
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Output file does not exist.")
@@ -2278,21 +2265,61 @@ def open_file_directly(path: Path) -> None:
     open_any_path(path)
 
 
+_NATIVE_DIALOG_LOCK = threading.Lock()
+
+
 def select_folder_dialog() -> str:
+    if not _NATIVE_DIALOG_LOCK.acquire(blocking=False):
+        raise RuntimeError("已有文件选择窗口打开，请先完成或关闭该窗口。")
     try:
         import tkinter as tk
         from tkinter import filedialog
     except Exception as exc:
+        _NATIVE_DIALOG_LOCK.release()
         raise RuntimeError("当前环境不支持原生文件夹选择窗口。") from exc
 
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
+    root = None
     try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
         selected = filedialog.askdirectory(title="选择待处理文件夹", mustexist=True)
     finally:
-        root.destroy()
+        if root is not None:
+            root.destroy()
+        _NATIVE_DIALOG_LOCK.release()
     return str(selected or "")
+
+
+def select_files_dialog(
+    title: str,
+    filetypes: list[tuple[str, str]],
+    *,
+    multiple: bool = True,
+) -> list[str]:
+    if not _NATIVE_DIALOG_LOCK.acquire(blocking=False):
+        raise RuntimeError("已有文件选择窗口打开，请先完成或关闭该窗口。")
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        _NATIVE_DIALOG_LOCK.release()
+        raise RuntimeError("当前环境不支持原生文件选择窗口。") from exc
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        if multiple:
+            selected = filedialog.askopenfilenames(title=title, filetypes=filetypes)
+            return [str(path) for path in selected if str(path)]
+        selected = filedialog.askopenfilename(title=title, filetypes=filetypes)
+        return [str(selected)] if selected else []
+    finally:
+        if root is not None:
+            root.destroy()
+        _NATIVE_DIALOG_LOCK.release()
 
 
 INDEX_HTML = """<!doctype html>
@@ -6339,6 +6366,8 @@ let appUpdateState = {
 };
 let appUpdateAutoPrompted = false;
 let latestResultFile = "";
+let lastResultSummaryPath = "";
+let statusRefreshInFlight = false;
 let availableModels = [];
 let currentProviderName = "DeepSeek";
 let currentBaseUrl = "";
@@ -6373,6 +6402,7 @@ let aiReviewTaskId = "";
 let aiReviewCurrentTask = null;
 let aiReviewLogCursor = 0;
 let aiReviewTaskPoller = null;
+let aiReviewTaskPollInFlight = false;
 let aiReviewPromptTemplates = [];
 let aiReviewDirectionalTemplates = [];
 let aiReviewForbiddenTemplates = [];
@@ -6810,25 +6840,40 @@ function setSubtab(group, targetId) {
 }
 
 async function api(path, options = {}) {
-  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
-  const headers = { ...(options.headers || {}) };
+  const { timeoutMs = 60000, ...fetchOptions } = options;
+  const isFormData = typeof FormData !== "undefined" && fetchOptions.body instanceof FormData;
+  const headers = { ...(fetchOptions.headers || {}) };
   if (!isFormData && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(path, {
-    headers,
-    ...options,
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    let message = text || response.statusText;
-    try {
-      const data = JSON.parse(text);
-      message = data?.detail || data?.message || message;
-    } catch (_) {}
-    throw new Error(message);
+  const controller = Number(timeoutMs) > 0 ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs)))
+    : null;
+  try {
+    const response = await fetch(path, {
+      ...fetchOptions,
+      headers,
+      signal: controller ? controller.signal : fetchOptions.signal,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      let message = text || response.statusText;
+      try {
+        const data = JSON.parse(text);
+        message = data?.detail || data?.message || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    return response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("请求超时，请检查任务状态后重试。");
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
   }
-  return response.json();
 }
 
 function settingsPayload() {
@@ -7081,7 +7126,7 @@ async function openDiffFieldSettings() {
   }
   $("diffFieldSettingsHint").textContent = "正在读取表头...";
   $("diffFieldSettingsOverlay").hidden = false;
-  const data = await api(`/api/diff-excel/field-match-headers?path_a=${encodeURIComponent(pathA)}&path_b=${encodeURIComponent(pathB)}`);
+  const data = await api(`/api/diff-excel/field-match-headers?path_a=${encodeURIComponent(pathA)}&path_b=${encodeURIComponent(pathB)}`, { timeoutMs: 300000 });
   diffFieldMatchSettings.headers = data;
   renderDiffFieldSettings(data);
   $("diffFieldSettingsHint").textContent = "";
@@ -9196,15 +9241,17 @@ async function uploadReviewConversationFiles(files) {
   const form = new FormData();
   Array.from(files).forEach((file) => form.append("files", file));
   $("reviewConversationHint").textContent = `正在添加 ${files.length} 个文件…`;
-  const response = await fetch(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments`, { method: "POST", body: form });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || data.message || "文件上传失败");
+  await api(`/api/ai-review/conversations/${encodeURIComponent(reviewConversationState.currentId)}/attachments`, {
+    method: "POST",
+    body: form,
+    timeoutMs: 300000,
+  });
   $("reviewConversationHint").textContent = "文件已添加";
   await refreshCurrentReviewConversation();
 }
 
 async function chooseReviewConversationFiles() {
-  const data = await api("/api/dialog/select-review-files");
+  const data = await api("/api/dialog/select-review-files", { timeoutMs: 0 });
   const paths = Array.isArray(data.file_paths) ? data.file_paths.filter(Boolean) : [];
   if (!paths.length) return;
   if (!reviewConversationState.currentId) await createReviewConversation();
@@ -9642,14 +9689,11 @@ async function uploadAiReviewFile(file) {
   $("reviewFileHint").textContent = "正在读取文件...";
   const formData = new FormData();
   formData.append("file", file);
-  const response = await fetch("/api/ai-review/file/upload", {
+  const data = await api("/api/ai-review/file/upload", {
     method: "POST",
     body: formData,
+    timeoutMs: 300000,
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.detail || data.message || response.statusText || "读取失败");
-  }
   if (String(data.file_type || "") === "excel") {
     initializeAiReviewExcelMapping(data);
     $("openExcelMappingButton").disabled = !aiReviewSheetNames.length;
@@ -9668,6 +9712,7 @@ async function loadAiReviewFile(filePath) {
   const data = await api("/api/ai-review/file/load", {
     method: "POST",
     body: JSON.stringify({ file_path: filePath }),
+    timeoutMs: 300000,
   });
   $("reviewFileHint").textContent = data.message || "读取完成";
   if (String(data.file_type || "") === "excel") {
@@ -9736,11 +9781,23 @@ async function startAiReviewTask() {
     stageLabel: "审校中",
     message: "正在执行 AI 审校",
   });
-  await pollAiReviewTask();
+  await pollAiReviewTaskSafely();
   if (aiReviewTaskPoller) {
     window.clearInterval(aiReviewTaskPoller);
   }
-  aiReviewTaskPoller = window.setInterval(pollAiReviewTask, 1500);
+  aiReviewTaskPoller = window.setInterval(pollAiReviewTaskSafely, 1500);
+}
+
+async function pollAiReviewTaskSafely() {
+  if (aiReviewTaskPollInFlight || !aiReviewTaskId || document.hidden) return;
+  aiReviewTaskPollInFlight = true;
+  try {
+    await pollAiReviewTask();
+  } catch (error) {
+    $("reviewTaskHint").textContent = error?.message || "审校状态读取失败，请稍后重试。";
+  } finally {
+    aiReviewTaskPollInFlight = false;
+  }
 }
 
 async function pollAiReviewTask() {
@@ -9881,6 +9938,7 @@ async function refreshModelList() {
   const data = await api("/api/providers/models", {
     method: "POST",
     body: JSON.stringify(modelConnectionPayload()),
+    timeoutMs: 120000,
   });
   const currentModel = $("modelName").value.trim();
   const nextModel = currentModel && (data.models || []).includes(currentModel)
@@ -10537,6 +10595,7 @@ async function chooseFolder() {
     const data = await api("/api/dialog/select-folder", {
       method: "POST",
       body: "{}",
+      timeoutMs: 0,
     });
     if (data.cancelled || !data.folder_path) {
       return;
@@ -10554,6 +10613,7 @@ async function chooseCrossExcelFolder() {
     const data = await api("/api/dialog/select-folder", {
       method: "POST",
       body: "{}",
+      timeoutMs: 0,
     });
     if (data.cancelled || !data.folder_path) {
       return;
@@ -10566,7 +10626,7 @@ async function chooseCrossExcelFolder() {
 }
 
 async function chooseDiffFolder(side) {
-  const data = await api("/api/dialog/select-folder", { method: "POST", body: "{}" });
+  const data = await api("/api/dialog/select-folder", { method: "POST", body: "{}", timeoutMs: 0 });
   if (!data.cancelled && data.folder_path) {
     if (side === "A") {
       $("diffPathA").value = data.folder_path;
@@ -10578,7 +10638,7 @@ async function chooseDiffFolder(side) {
 }
 
 async function chooseDiffFile(side) {
-  const data = await api("/api/dialog/select-review-file");
+  const data = await api("/api/dialog/select-review-file", { timeoutMs: 0 });
   if (!data.cancelled && data.file_path) {
     if (side === "A") {
       $("diffPathA").value = data.file_path;
@@ -10664,6 +10724,7 @@ async function searchCrossExcel() {
         query,
         limit: Number($("crossExcelLimit").value || 300),
       }),
+      timeoutMs: 600000,
     });
     renderCrossExcelSearchResults(data);
     $("crossExcelSearchHint").textContent = data.truncated ? "结果过多，已按上限截断显示" : "搜索完成";
@@ -10722,6 +10783,7 @@ async function mergeCrossExcel() {
         headers,
         apply_format: $("crossExcelApplyFormat").checked,
       }),
+      timeoutMs: 600000,
     });
     setCrossExcelOutput(
       data.output_file || "",
@@ -10864,6 +10926,7 @@ async function exportDiffExcel() {
         query: "",
         output_file: "",
       }),
+      timeoutMs: 600000,
     });
     diffExcelState.outputFile = String(data.output_file || "");
     $("diffExcelHint").textContent = "差异结果已导出。";
@@ -10888,6 +10951,7 @@ async function highlightDiffExcel() {
         target: $("diffMarkTarget").value,
         color_hex: $("diffHighlightColor").value || "#FFD966",
       }),
+      timeoutMs: 600000,
     });
     $("diffHighlightHint").textContent = `已标记 ${Number(data.changed_cells || 0)} 个单元格，涉及 ${Number(data.workbook_count || 0)} 个文件。`;
   } catch (error) {
@@ -10977,6 +11041,7 @@ function renderResultSummary(data) {
 async function refreshResults(outputFile = "") {
   const query = outputFile ? `?output_file=${encodeURIComponent(outputFile)}` : "";
   const data = await api(`/api/results/summary${query}`);
+  lastResultSummaryPath = outputFile || String(data.output_file || "");
   renderResultSummary(data);
 }
 
@@ -11051,7 +11116,7 @@ async function openPreprocessMappingDialog() {
     setPreprocessTaskHint("XLIFF 文件无需配置列映射，可直接开始提取。", false);
     return;
   }
-  const data = await api(`/api/preprocess/file-mapping-scan?file_path=${encodeURIComponent(preprocessActiveFile.path)}`);
+  const data = await api(`/api/preprocess/file-mapping-scan?file_path=${encodeURIComponent(preprocessActiveFile.path)}`, { timeoutMs: 300000 });
   preprocessMappingState.sheetNames = data.sheet_names || [];
   preprocessMappingState.columnsBySheet = data.columns_by_sheet || {};
   preprocessMappingState.selected = preprocessActiveFile?.selected || {};
@@ -11134,7 +11199,7 @@ function renderPreprocessFiles() {
   updatePreprocessWorkflowState();
 }
 async function addPreprocessFiles() {
-  const data = await api("/api/dialog/select-preprocess-files", { method: "POST", body: "{}" });
+  const data = await api("/api/dialog/select-preprocess-files", { method: "POST", body: "{}", timeoutMs: 0 });
   const paths = Array.isArray(data.file_paths) ? data.file_paths.filter(Boolean) : [];
   if (!paths.length) return;
   paths.forEach((path) => { if (!preprocessFiles.some((f) => f.path === path)) preprocessFiles.push(createPreprocessFile(path)); });
@@ -11331,10 +11396,25 @@ async function refreshStatus() {
   $("resumeButton").disabled = Boolean(data.is_running) || !data.can_resume;
   $("stopButton").disabled = !data.is_running;
   $("clearCacheButton").disabled = Boolean(data.is_running) || !data.can_resume;
-  if (data.output_file) {
+  if (data.output_file && data.output_file !== lastResultSummaryPath) {
     await refreshResults(data.output_file);
-  } else {
+  } else if (!data.output_file && (latestResultFile || lastResultSummaryPath)) {
+    lastResultSummaryPath = "";
     renderResultSummary({});
+  }
+}
+
+async function refreshStatusSafely() {
+  if (statusRefreshInFlight || document.hidden) return;
+  statusRefreshInFlight = true;
+  try {
+    await refreshStatus();
+  } catch (error) {
+    if (currentPageId === "overviewPage") {
+      setPreprocessTaskHint(error?.message || "任务状态读取失败，请稍后重试。", true);
+    }
+  } finally {
+    statusRefreshInFlight = false;
   }
 }
 
@@ -11395,15 +11475,24 @@ renderPreprocessMappingTemplates();
 $("cancelPreprocessMappingButton").addEventListener("click", () => $("preprocessMappingDialog").close());
 $("closePreprocessMappingButton").addEventListener("click", () => $("preprocessMappingDialog").close());
 $("bindMemoQButton").addEventListener("click", () => bindMemoQAccount().catch(() => undefined));
-$("unbindMemoQButton").addEventListener("click", async () => { await api("/api/ai-review/term-bases/memoq/bind", { method: "DELETE" }); await loadMemoQAccountStatus(); await loadReviewTermBases(); });
+$("unbindMemoQButton").addEventListener("click", async () => {
+  try {
+    await api("/api/ai-review/term-bases/memoq/bind", { method: "DELETE" });
+    await loadMemoQAccountStatus();
+    await loadReviewTermBases();
+  } catch (error) {
+    $("memoqAccountStatus").textContent = error?.message || "解绑失败，请稍后重试";
+    $("memoqAccountStatus").classList.add("error");
+  }
+});
 loadMemoQAccountStatus();
-$("saveSettingsButton").addEventListener("click", saveSettings);
-$("savePromptTemplatesButton").addEventListener("click", savePromptTemplates);
-$("resetPromptTemplatesButton").addEventListener("click", resetPromptTemplates);
+$("saveSettingsButton").addEventListener("click", () => saveSettings().catch((error) => { $("saveHint").textContent = error.message; }));
+$("savePromptTemplatesButton").addEventListener("click", () => savePromptTemplates().catch((error) => { $("promptTemplateHint").textContent = error.message; }));
+$("resetPromptTemplatesButton").addEventListener("click", () => resetPromptTemplates().catch((error) => { $("promptTemplateHint").textContent = error.message; }));
 $("addAsciiPatternButton").addEventListener("click", addAsciiPattern);
-$("saveAsciiPatternsButton").addEventListener("click", saveAsciiPatterns);
+$("saveAsciiPatternsButton").addEventListener("click", () => saveAsciiPatterns().catch((error) => { $("asciiPatternHint").textContent = error.message; }));
 $("addBuiltinRuleButton").addEventListener("click", addBuiltinRule);
-$("saveBuiltinRulesButton").addEventListener("click", saveBuiltinRules);
+$("saveBuiltinRulesButton").addEventListener("click", () => saveBuiltinRules().catch((error) => { $("builtinRuleHint").textContent = error.message; }));
 $("updateNoticeButton").addEventListener("click", openAppUpdateModal);
 $("pendingRuleNoticeButton").addEventListener("click", openPendingRuleModal);
 $("closeAppUpdateModalButton").addEventListener("click", closeAppUpdateModal);
@@ -11412,7 +11501,7 @@ $("confirmAppUpdateButton").addEventListener("click", startAppUpdate);
 $("closePendingRuleModalButton").addEventListener("click", closePendingRuleModal);
 $("pendingRuleSelectAllButton").addEventListener("click", () => setAllPendingRuleSelection(true));
 $("pendingRuleClearSelectionButton").addEventListener("click", () => setAllPendingRuleSelection(false));
-$("confirmPendingRuleImportButton").addEventListener("click", importPendingRules);
+$("confirmPendingRuleImportButton").addEventListener("click", () => importPendingRules().catch((error) => { $("pendingRuleHint").textContent = error.message; }));
 $("chooseFolderButton").addEventListener("click", chooseFolder);
 $("chooseCrossExcelFolderButton").addEventListener("click", chooseCrossExcelFolder);
 $("chooseDiffPathAButton").addEventListener("click", () => chooseDiffFolder("A").catch((error) => {
@@ -11541,13 +11630,17 @@ document.addEventListener("pointerdown", (event) => {
   }
 });
 $("promptDialogTemplateSelect").addEventListener("change", async () => {
-  const templateId = $("promptDialogTemplateSelect").value;
-  if (!templateId) return;
-  const data = await api(`/api/ai-review/prompt-templates/${encodeURIComponent(templateId)}`);
-  reviewConversationState.promptTemplateId = templateId;
-  fillAiReviewPromptDialog(data.template || {});
-  updateReviewComposerChips();
-  await saveReviewConversationComposerSettings();
+  try {
+    const templateId = $("promptDialogTemplateSelect").value;
+    if (!templateId) return;
+    const data = await api(`/api/ai-review/prompt-templates/${encodeURIComponent(templateId)}`);
+    reviewConversationState.promptTemplateId = templateId;
+    fillAiReviewPromptDialog(data.template || {});
+    updateReviewComposerChips();
+    await saveReviewConversationComposerSettings();
+  } catch (error) {
+    $("promptTemplateHint").textContent = error?.message || "提示词模板切换失败";
+  }
 });
 $("chooseReviewFileButton").addEventListener("click", () => chooseAiReviewFile().catch((error) => {
   $("reviewTaskHint").textContent = error.message;
@@ -11726,57 +11819,34 @@ $("startButton").addEventListener("click", () => startTask().catch((error) => {
   setPreprocessTaskHint(error.message, true);
   $("startButton").disabled = preprocessFiles.some((file) => preprocessFileRequiresMapping(file) && !file.mapped) || !preprocessFiles.length;
 }));
-$("resumeButton").addEventListener("click", resumeTask);
-$("stopButton").addEventListener("click", stopTask);
-$("clearCacheButton").addEventListener("click", clearRuntimeCache);
+$("resumeButton").addEventListener("click", () => resumeTask().catch((error) => setPreprocessTaskHint(error.message, true)));
+$("stopButton").addEventListener("click", () => stopTask().catch((error) => setPreprocessTaskHint(error.message, true)));
+$("clearCacheButton").addEventListener("click", () => clearRuntimeCache().catch((error) => setPreprocessTaskHint(error.message, true)));
 $("crossExcelQuery").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
     searchCrossExcel();
   }
 });
-$("openCrossExcelOutputButton").addEventListener("click", async () => {
-  if (!crossExcelOutputFile) return;
-  await api(`/api/results/open-folder?output_file=${encodeURIComponent(crossExcelOutputFile)}`, {
-    method: "POST",
-    body: "{}",
-  });
-});
-$("openCrossExcelOutputFileButton").addEventListener("click", async () => {
-  if (!crossExcelOutputFile) return;
-  await api(`/api/results/open-file?output_file=${encodeURIComponent(crossExcelOutputFile)}`, {
-    method: "POST",
-    body: "{}",
-  });
-});
-$("openDiffOutputFolderButton").addEventListener("click", async () => {
-  if (!diffExcelState.outputFile) return;
-  await api(`/api/results/open-folder?output_file=${encodeURIComponent(diffExcelState.outputFile)}`, {
-    method: "POST",
-    body: "{}",
-  });
-});
-$("openDiffOutputFileButton").addEventListener("click", async () => {
-  if (!diffExcelState.outputFile) return;
-  await api(`/api/results/open-file?output_file=${encodeURIComponent(diffExcelState.outputFile)}`, {
-    method: "POST",
-    body: "{}",
-  });
-});
-$("downloadResultButton").addEventListener("click", async () => {
-  if (!latestResultFile) return;
-  await api(`/api/results/open-file?output_file=${encodeURIComponent(latestResultFile)}`, {
-    method: "POST",
-    body: "{}",
-  });
-});
-$("openResultFolderButton").addEventListener("click", async () => {
-  if (!latestResultFile) return;
-  await api(`/api/results/open-folder?output_file=${encodeURIComponent(latestResultFile)}`, {
-    method: "POST",
-    body: "{}",
-  });
-});
+async function openGeneratedOutput(endpoint, outputFile, hintId) {
+  if (!outputFile) return;
+  try {
+    await api(`${endpoint}?output_file=${encodeURIComponent(outputFile)}`, {
+      method: "POST",
+      body: "{}",
+    });
+  } catch (error) {
+    const hint = $(hintId);
+    if (hint) hint.textContent = error?.message || "无法打开输出内容";
+  }
+}
+
+$("openCrossExcelOutputButton").addEventListener("click", () => openGeneratedOutput("/api/results/open-folder", crossExcelOutputFile, "crossExcelOutputHint"));
+$("openCrossExcelOutputFileButton").addEventListener("click", () => openGeneratedOutput("/api/results/open-file", crossExcelOutputFile, "crossExcelOutputHint"));
+$("openDiffOutputFolderButton").addEventListener("click", () => openGeneratedOutput("/api/results/open-folder", diffExcelState.outputFile, "diffExcelHint"));
+$("openDiffOutputFileButton").addEventListener("click", () => openGeneratedOutput("/api/results/open-file", diffExcelState.outputFile, "diffExcelHint"));
+$("downloadResultButton").addEventListener("click", () => openGeneratedOutput("/api/results/open-file", latestResultFile, "preprocessTaskHint"));
+$("openResultFolderButton").addEventListener("click", () => openGeneratedOutput("/api/results/open-folder", latestResultFile, "preprocessTaskHint"));
 
 document.querySelectorAll(".nav-link, .shortcut-button").forEach((button) => {
   button.addEventListener("click", () => setPage(button.dataset.pageTarget));
@@ -11808,7 +11878,7 @@ refreshDiffPresetColorButtons();
 syncDiffCompareModeUi();
 updateAiReviewModeVisibility();
 renderCurrentTaskStatus();
-Promise.all([
+Promise.allSettled([
   loadFeedbackStatus(),
   loadSettings(),
   loadAsciiPatterns(),
@@ -11819,10 +11889,14 @@ Promise.all([
   Promise.all([loadAiReviewPromptTemplates(), loadReviewTermBases()]).then(() => loadReviewConversations()),
   loadAiReviewDirectionalTemplates(),
   loadAiReviewForbiddenTemplates(),
-]).then(refreshStatus).catch((error) => {
-  $("statusMessage").textContent = error.message;
+]).then((results) => {
+  const failed = results.filter((item) => item.status === "rejected");
+  if (failed.length) {
+    console.warn(`有 ${failed.length} 项初始化数据加载失败，相关页面可稍后重试。`);
+  }
+  return refreshStatusSafely();
 });
-setInterval(refreshStatus, 1500);
+setInterval(refreshStatusSafely, 1500);
 """
 
 

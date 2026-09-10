@@ -109,6 +109,8 @@ class ExtractionTaskFacade:
         self._output_file = ""
         self._last_error = ""
         self._active_telemetry_context: Dict[str, object] = {}
+        self._result_summary_cache_key: Optional[tuple[str, int, int]] = None
+        self._result_summary_cache: Optional[ResultSummary] = None
 
     def load_settings(self) -> AppSettings:
         return self.settings_store.load()
@@ -137,6 +139,8 @@ class ExtractionTaskFacade:
             self._last_progress = {}
             self._output_file = ""
             self._last_error = ""
+            self._result_summary_cache_key = None
+            self._result_summary_cache = None
             self._active_telemetry_context = _build_telemetry_context(
                 settings=active_settings,
                 task_input=task_input,
@@ -167,6 +171,8 @@ class ExtractionTaskFacade:
             self._logs.append("\u8fd0\u884c\u7f13\u5b58\u5df2\u6e05\u7a7a\u3002")
             self._last_progress = {}
             self._last_error = ""
+            self._result_summary_cache_key = None
+            self._result_summary_cache = None
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         thread = self._thread
@@ -230,11 +236,20 @@ class ExtractionTaskFacade:
             return ResultSummary(output_file=str(path), exists=False, error="Output file does not exist.")
 
         try:
+            stat = path.stat()
+            cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError as exc:
+            return ResultSummary(output_file=str(path), exists=False, error=str(exc))
+        with self._lock:
+            if cache_key == self._result_summary_cache_key and self._result_summary_cache is not None:
+                return self._result_summary_cache
+
+        try:
             workbook = load_workbook(path, read_only=True, data_only=True)
         except Exception as exc:
             return ResultSummary(output_file=str(path), exists=True, error=str(exc))
         try:
-            return ResultSummary(
+            summary = ResultSummary(
                 output_file=str(path),
                 exists=True,
                 term_library_count=_count_sheet_rows(workbook, TERM_LIBRARY_SHEET),
@@ -244,6 +259,10 @@ class ExtractionTaskFacade:
             )
         finally:
             workbook.close()
+        with self._lock:
+            self._result_summary_cache_key = cache_key
+            self._result_summary_cache = summary
+        return summary
 
     def _run_task(self, settings: AppSettings, task_input: Optional[TaskInput], resume: bool) -> None:
         service = self.service_factory(

@@ -12,9 +12,9 @@
       "enabled": true,
       "order_index": 1,
       "examples": [
-        "<color=#52a500>",
-        "<color=#f07100>",
-        "<color=#ff9de4>"
+        "<sprite name=\"MaxCoreHP\">",
+        "<size=50%>",
+        "<indent=20>"
       ],
       "source": "builtin",
       "conflict_notes": ""
@@ -48,9 +48,9 @@
       "enabled": true,
       "order_index": 3,
       "examples": [
-        "</i>",
-        "</width>",
-        "</b>"
+        "</color>",
+        "</size>",
+        "</indent>"
       ],
       "source": "builtin",
       "conflict_notes": ""
@@ -84,9 +84,9 @@
       "enabled": true,
       "order_index": 5,
       "examples": [
-        "{0}",
-        "{0:SUBMITTED_COLLECTION_ITEM_COUNT}",
-        "{1}"
+        "{HealTool.HealAmount}",
+        "{requiredDifficulty}",
+        "{attributeType}"
       ],
       "source": "builtin",
       "conflict_notes": ""
@@ -208,6 +208,24 @@
         "{filter|Warning}",
         "{base|Warning}",
         "{chargesleft|Warning}"
+      ],
+      "source": "builtin",
+      "conflict_notes": ""
+    },
+    {
+      "rule_id": "ai_1_sprite_coin_index_0",
+      "name": "sprite_tag",
+      "pattern": "<sprite=\"[^\"]*\" index=\\d+>",
+      "element_type": "html",
+      "open_pattern": "",
+      "close_pattern": "",
+      "empty_pattern": "<sprite=\"[^\"]*\" index=\\d+>",
+      "enabled": true,
+      "order_index": 13,
+      "examples": [
+        "<sprite=\"coin\" index=0>",
+        "<sprite=\"mousetip\" index=0>",
+        "<sprite=\"ItemTypeIcon\" index=0>"
       ],
       "source": "builtin",
       "conflict_notes": ""

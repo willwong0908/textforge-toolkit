@@ -8,7 +8,7 @@ import re
 import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from .constants import STAGE_LABELS
 from .core import (
