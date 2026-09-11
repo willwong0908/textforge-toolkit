@@ -89,6 +89,45 @@ def memory_snapshot(session_id: str) -> dict:
             'rules': loads_json(row['rules_json'], []) if row else []}
 
 
+def update_memory(session_id: str, expected_version: int, edits: list[dict]) -> dict:
+    """Update rule wording without letting a stale editor overwrite AI learning."""
+    with get_connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if not conn.execute('SELECT 1 FROM review_sessions WHERE id=?', (session_id,)).fetchone():
+            raise ValueError('审校会话不存在')
+        row = conn.execute('SELECT * FROM review_memory WHERE session_id=?', (session_id,)).fetchone()
+        version = int(row['version']) if row else 0
+        rules = loads_json(row['rules_json'], []) if row else []
+        if version != int(expected_version):
+            raise ValueError('会话规范已被更新，请重新打开后再编辑')
+        current_ids = [str(rule.get('id') or '') for rule in rules]
+        edit_ids = [str(edit.get('id') or '') for edit in edits]
+        if len(set(edit_ids)) != len(edit_ids) or set(edit_ids) != set(current_ids):
+            raise ValueError('规范列表已变化，请重新打开后再编辑')
+        edited = {str(edit.get('id') or ''): str(edit.get('text') or '').strip() for edit in edits}
+        if any(not text for text in edited.values()):
+            raise ValueError('规范内容不能为空')
+        if any(len(text) > 600 for text in edited.values()):
+            raise ValueError('单条规范不能超过 600 字')
+        if len(set(edited.values())) != len(edited):
+            raise ValueError('规范内容不能重复')
+        changed = False
+        updated = []
+        for rule in rules:
+            item = dict(rule)
+            text = edited[str(rule.get('id') or '')]
+            changed = changed or text != str(rule.get('text') or '')
+            item['text'] = text
+            updated.append(item)
+        if changed:
+            version += 1
+            conn.execute('UPDATE review_memory SET version=?, rules_json=?, updated_at=? WHERE session_id=?',
+                         (version, dumps_json(updated), utc_now(), session_id))
+    return {'version': version, 'rules': updated,
+            'active_count': sum(bool(rule.get('active')) for rule in updated),
+            'candidate_count': sum(not bool(rule.get('active')) for rule in updated)}
+
+
 def memory_prompt(snapshot: dict) -> str:
     active = [r['text'] for r in snapshot.get('rules', []) if r.get('active')]
     if not active:
@@ -241,11 +280,12 @@ def import_feedback(session_id: str, content: bytes) -> dict:
 
 def learning_status(session_id: str) -> dict:
     with get_connection() as conn:
-        rows = conn.execute('SELECT id, task_id, status, error, created_at FROM review_learning_events '
+        rows = conn.execute('SELECT id, task_id, status, error, created_at, updated_at FROM review_learning_events '
                             'WHERE session_id=? ORDER BY created_at DESC LIMIT 20', (session_id,)).fetchall()
     snapshot = memory_snapshot(session_id)
     return {'events': [dict(r) for r in rows], 'version': snapshot['version'],
-            'active_count': sum(bool(r.get('active')) for r in snapshot['rules'])}
+            'active_count': sum(bool(r.get('active')) for r in snapshot['rules']),
+            'candidate_count': sum(not bool(r.get('active')) for r in snapshot['rules'])}
 
 
 def retry_learning(session_id: str, event_id: str) -> None:

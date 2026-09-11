@@ -65,6 +65,16 @@ class LearningOptions(BaseModel):
     learning_enabled: bool = True
 
 
+class MemoryRuleEdit(BaseModel):
+    id: str
+    text: str
+
+
+class MemoryUpdatePayload(BaseModel):
+    version: int
+    rules: list[MemoryRuleEdit]
+
+
 @router.get('/learning/options')
 def get_learning_options():
     return learning_service.options()
@@ -99,6 +109,23 @@ async def feedback_file(session_id: str, file: UploadFile = File(...)):
 @router.get('/{session_id}/learning')
 def learning(session_id: str):
     return learning_service.learning_status(session_id)
+
+
+@router.get('/{session_id}/memory')
+def get_memory(session_id: str):
+    snapshot = learning_service.memory_snapshot(session_id)
+    return {**snapshot,
+            'active_count': sum(bool(rule.get('active')) for rule in snapshot['rules']),
+            'candidate_count': sum(not bool(rule.get('active')) for rule in snapshot['rules'])}
+
+
+@router.put('/{session_id}/memory')
+def update_memory(session_id: str, payload: MemoryUpdatePayload):
+    try:
+        return learning_service.update_memory(
+            session_id, payload.version, [rule.model_dump() for rule in payload.rules])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post('/{session_id}/learning/{event_id}/retry')

@@ -3100,7 +3100,19 @@ INDEX_HTML = """<!doctype html>
                 <div id="reviewTermBaseOptions" class="review-term-base-options"></div>
               </div>
               <span id="reviewConversationHint" class="hint"></span>
-              <div id="reviewLearningStatus" class="hint" aria-live="polite"></div>
+              <div class="review-learning-panel">
+                <div class="review-learning-summary-row">
+                  <div id="reviewLearningStatus" class="hint" aria-live="polite"></div>
+                  <button id="reviewMemoryButton" class="secondary review-memory-button" type="button">查看规范</button>
+                </div>
+                <div id="reviewLearningProgress" class="review-learning-progress" hidden aria-live="polite">
+                  <div class="review-learning-progress-head">
+                    <span id="reviewLearningProgressLabel">等待处理</span>
+                    <span id="reviewLearningProgressValue">0%</span>
+                  </div>
+                  <div class="review-learning-progress-track"><span id="reviewLearningProgressBar"></span></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -3293,6 +3305,25 @@ INDEX_HTML = """<!doctype html>
           </div>
           <span id="reviewFollowupHint" class="hint"></span>
         </section>
+      </div>
+    </div>
+  </div>
+  <div id="reviewMemoryOverlay" class="modal-overlay" hidden>
+    <div class="modal-card review-memory-modal">
+      <div class="modal-header">
+        <div>
+          <h3>会话规范</h3>
+          <p id="reviewMemorySummary">查看并编辑当前会话自主学习形成的规范。</p>
+        </div>
+        <button id="closeReviewMemoryButton" class="modal-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <div id="reviewMemoryRuleList" class="review-memory-rule-list"></div>
+      <div class="modal-footer review-memory-footer">
+        <span id="reviewMemoryHint" class="hint" aria-live="polite"></span>
+        <div class="actions compact-actions">
+          <button id="cancelReviewMemoryButton" class="secondary" type="button">取消</button>
+          <button id="saveReviewMemoryButton" class="primary" type="button">保存修改</button>
+        </div>
       </div>
     </div>
   </div>
@@ -4288,6 +4319,42 @@ button:disabled { opacity: .58; cursor: not-allowed; }
 .review-feedback-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
 .review-feedback-actions .review-followup-inline-button { position: static; }
 .review-feedback-actions input { flex: 1 1 150px; width: 150px; min-width: 0; }
+.review-learning-panel { display: grid; gap: 8px; margin-top: 2px; }
+.review-learning-summary-row { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.review-learning-summary-row .hint { min-width: 0; }
+.review-memory-button { min-height: 30px; padding: 0 11px; white-space: nowrap; }
+.review-learning-progress {
+  display: grid;
+  gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(93, 141, 255, .06);
+}
+.review-learning-progress[hidden] { display: none; }
+.review-learning-progress-head { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+.review-learning-progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: rgba(130, 153, 190, .18); }
+.review-learning-progress-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #7ad8cd, #8daeff); transition: width .3s ease; }
+.review-learning-progress.running .review-learning-progress-track span { animation: review-learning-pulse 1.25s ease-in-out infinite alternate; }
+.review-learning-progress.completed .review-learning-progress-track span { background: #66d2a9; }
+.review-learning-progress.failed .review-learning-progress-track span { background: #ff8f95; }
+@keyframes review-learning-pulse { from { opacity: .58; } to { opacity: 1; } }
+.review-memory-modal { width: min(920px, calc(100vw - 32px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.review-memory-rule-list { min-height: 180px; max-height: min(600px, calc(100dvh - 260px)); overflow: auto; display: grid; align-content: start; gap: 12px; padding: 2px; }
+.review-memory-empty { min-height: 180px; display: grid; place-items: center; color: var(--muted); text-align: center; }
+.review-memory-section { display: grid; gap: 8px; }
+.review-memory-section + .review-memory-section { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line); }
+.review-memory-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.review-memory-section-head h4 { margin: 0; color: var(--text); font-size: 15px; }
+.review-memory-section-head span { color: var(--muted); font-size: 12px; }
+.review-memory-rule { display: grid; grid-template-columns: 72px 80px minmax(0, 1fr); align-items: start; gap: 10px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7, 15, 30, .22); }
+.review-memory-rule-index, .review-memory-rule-weight { padding-top: 9px; color: var(--muted); font-size: 12px; }
+.review-memory-rule textarea { width: 100%; min-height: 72px; resize: vertical; line-height: 1.55; }
+.review-memory-footer { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+@media (max-width: 680px) {
+  .review-memory-rule { grid-template-columns: 1fr 1fr; }
+  .review-memory-rule textarea { grid-column: 1 / -1; }
+}
 .review-detail-table td.review-detail-issue-cell { padding-bottom: 12px; }
 .review-followup-modal {
   width: min(1180px, calc(100vw - 36px));
@@ -6430,6 +6497,7 @@ let reviewFeedbackDraft = new Map();
 let reviewFeedbackTaskId = '';
 let reviewFeedbackSessionId = '';
 let reviewFeedbackSaving = false;
+let reviewMemoryState = { sessionId: '', version: 0, rules: [], saving: false };
 let aiReviewFollowupState = { taskId: "", resultId: "", item: null, messages: [] };
 let reviewConversationState = {
   sessions: [],
@@ -8571,15 +8639,20 @@ async function confirmReviewFeedback() {
   reviewFeedbackSaving = true;
   $('confirmReviewFeedbackButton').disabled = true;
   $('closeReviewDetailButton').disabled = true;
+  showReviewLearningProgress('saving');
   try {
     const result = await api(`/api/ai-review/conversations/${encodeURIComponent(reviewFeedbackSessionId)}/feedback`,
       {method:'POST', body:JSON.stringify({task_id:reviewFeedbackTaskId, entries})});
     reviewFeedbackSaving = false;
     closeReviewDetailDialog();
     showFeedbackResult(result, reviewFeedbackSessionId, reviewFeedbackTaskId);
+    showReviewLearningProgress(result.event_id ? 'queued' : '');
     await refreshCurrentReviewConversation();
     await refreshReviewLearningStatus();
-  } catch (error) { $('reviewFeedbackHint').textContent = error.message; }
+  } catch (error) {
+    showReviewLearningProgress('');
+    $('reviewFeedbackHint').textContent = error.message;
+  }
   finally {
     reviewFeedbackSaving = false;
     $('confirmReviewFeedbackButton').disabled = false;
@@ -8607,17 +8680,158 @@ function showFeedbackResult(result, sessionId, taskId) {
   }
 }
 
+function showReviewLearningProgress(status, label) {
+  const box = $('reviewLearningProgress');
+  const values = {
+    saving: {percent:8, text:'正在保存反馈'},
+    queued: {percent:18, text:'学习请求已排队'},
+    running: {percent:68, text:'AI 正在更新会话规范'},
+    completed: {percent:100, text:'会话规范已更新'},
+    failed: {percent:100, text:'会话规范更新失败'},
+    uploading: {percent:10, text:'正在上传并校验反馈文件'}
+  };
+  const view = values[status];
+  if (!view) {
+    box.hidden = true;
+    box.className = 'review-learning-progress';
+    return;
+  }
+  box.hidden = false;
+  box.className = `review-learning-progress ${status}`;
+  $('reviewLearningProgressLabel').textContent = label || view.text;
+  $('reviewLearningProgressValue').textContent = `${view.percent}%`;
+  $('reviewLearningProgressBar').style.width = `${view.percent}%`;
+}
+
+function renderReviewMemoryRules() {
+  const list = $('reviewMemoryRuleList');
+  list.replaceChildren();
+  const rules = reviewMemoryState.rules || [];
+  $('reviewMemorySummary').textContent = rules.length
+    ? `版本 v${reviewMemoryState.version} · 使用中 ${rules.filter(rule => rule.active).length} 条 · 候补 ${rules.filter(rule => !rule.active).length} 条`
+    : '当前会话还没有学习到规范。提交误报反馈后会自动生成。';
+  $('saveReviewMemoryButton').disabled = !rules.length;
+  if (!rules.length) {
+    const empty = document.createElement('div');
+    empty.className = 'review-memory-empty';
+    empty.textContent = '暂无会话规范';
+    list.appendChild(empty);
+    return;
+  }
+  const sections = [
+    {active:true, title:'使用中的规范', detail:'会注入本会话后续审校请求'},
+    {active:false, title:'候补规范', detail:'不占用审校请求，仅参与后续权重更新'}
+  ];
+  sections.forEach(sectionInfo => {
+    const entries = rules.filter(rule => Boolean(rule.active) === sectionInfo.active);
+    if (!entries.length) return;
+    const section = document.createElement('section');
+    section.className = 'review-memory-section';
+    const head = document.createElement('div');
+    head.className = 'review-memory-section-head';
+    const title = document.createElement('h4');
+    title.textContent = `${sectionInfo.title}（${entries.length}）`;
+    const detail = document.createElement('span');
+    detail.textContent = sectionInfo.detail;
+    head.append(title, detail);
+    section.appendChild(head);
+    entries.forEach((rule, index) => {
+      const row = document.createElement('div');
+      row.className = 'review-memory-rule';
+      const number = document.createElement('span');
+      number.className = 'review-memory-rule-index';
+      number.textContent = `规范 ${index + 1}`;
+      const weight = document.createElement('span');
+      weight.className = 'review-memory-rule-weight';
+      weight.textContent = `权重 ${Number(rule.weight || 0).toFixed(1)}`;
+      const editor = document.createElement('textarea');
+      editor.value = String(rule.text || '');
+      editor.maxLength = 600;
+      editor.dataset.ruleId = String(rule.id || '');
+      editor.setAttribute('aria-label', `${sectionInfo.title} ${index + 1}`);
+      row.append(number, weight, editor);
+      section.appendChild(row);
+    });
+    list.appendChild(section);
+  });
+}
+
+async function openReviewMemoryDialog() {
+  const sessionId = reviewConversationState.currentId;
+  if (!sessionId) { showReviewConversationError(new Error('请先选择审校会话')); return; }
+  $('reviewMemoryHint').textContent = '正在读取会话规范…';
+  $('reviewMemoryOverlay').hidden = false;
+  $('saveReviewMemoryButton').disabled = true;
+  try {
+    const memory = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/memory`);
+    if (sessionId !== reviewConversationState.currentId) { closeReviewMemoryDialog(); return; }
+    reviewMemoryState = {sessionId, version:Number(memory.version || 0), rules:memory.rules || [], saving:false};
+    $('reviewMemoryHint').textContent = '';
+    renderReviewMemoryRules();
+  } catch (error) {
+    $('reviewMemoryHint').textContent = error.message;
+    $('reviewMemoryRuleList').replaceChildren();
+  }
+}
+
+function closeReviewMemoryDialog() {
+  if (reviewMemoryState.saving) return;
+  reviewMemoryState = {sessionId:'', version:0, rules:[], saving:false};
+  $('reviewMemoryOverlay').hidden = true;
+  $('reviewMemoryHint').textContent = '';
+}
+
+async function saveReviewMemory() {
+  if (reviewMemoryState.saving || !reviewMemoryState.sessionId) return;
+  const rules = [...$('reviewMemoryRuleList').querySelectorAll('textarea[data-rule-id]')]
+    .map(editor => ({id:editor.dataset.ruleId, text:editor.value.trim()}));
+  if (rules.some(rule => !rule.text)) { $('reviewMemoryHint').textContent = '规范内容不能为空。'; return; }
+  reviewMemoryState.saving = true;
+  $('saveReviewMemoryButton').disabled = true;
+  $('closeReviewMemoryButton').disabled = true;
+  $('cancelReviewMemoryButton').disabled = true;
+  $('reviewMemoryHint').textContent = '正在保存…';
+  try {
+    const memory = await api(`/api/ai-review/conversations/${encodeURIComponent(reviewMemoryState.sessionId)}/memory`, {
+      method:'PUT', body:JSON.stringify({version:reviewMemoryState.version, rules})
+    });
+    reviewMemoryState.version = Number(memory.version || reviewMemoryState.version);
+    reviewMemoryState.rules = memory.rules || [];
+    reviewMemoryState.saving = false;
+    await refreshReviewLearningStatus();
+    closeReviewMemoryDialog();
+  } catch (error) {
+    $('reviewMemoryHint').textContent = error.message;
+  } finally {
+    reviewMemoryState.saving = false;
+    $('saveReviewMemoryButton').disabled = false;
+    $('closeReviewMemoryButton').disabled = false;
+    $('cancelReviewMemoryButton').disabled = false;
+  }
+}
+
 async function refreshReviewLearningStatus() {
   const sessionId = reviewConversationState.currentId;
-  if (!sessionId) { $('reviewLearningStatus').textContent = ''; return; }
+  if (!sessionId) {
+    $('reviewLearningStatus').textContent = '';
+    $('reviewMemoryButton').disabled = true;
+    showReviewLearningProgress('');
+    return;
+  }
   const status = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/learning`);
   if (sessionId !== reviewConversationState.currentId) return;
   const box = $('reviewLearningStatus');
-  box.textContent = status.version ? `会话记忆 v${status.version} · ${status.active_count} 条规范` : '';
-  (status.events || []).filter(e => e.status !== 'completed').forEach(event => {
+  $('reviewMemoryButton').disabled = false;
+  box.replaceChildren();
+  box.append(document.createTextNode(status.version
+    ? `会话记忆 v${status.version} · ${status.active_count} 条使用中${status.candidate_count ? ` · ${status.candidate_count} 条候补` : ''}`
+    : '会话记忆 · 暂无规范'));
+  const event = (status.events || [])[0];
+  showReviewLearningProgress(event?.status || '');
+  if (event?.status === 'failed') {
+    $('reviewLearningProgressLabel').textContent = `会话规范更新失败：${event.error || '未知错误'}`;
     const line = document.createElement('div');
-    line.textContent = event.status === 'failed' ? `自主学习失败：${event.error}` : '自主学习中…';
-    if (event.status === 'failed') {
+    line.className = 'review-learning-retry';
       const retry = document.createElement('button');
       retry.type = 'button'; retry.textContent = '重试学习';
       retry.addEventListener('click', async () => {
@@ -8629,9 +8843,8 @@ async function refreshReviewLearningStatus() {
         finally { retry.disabled = false; }
       });
       line.appendChild(retry);
-    }
     box.appendChild(line);
-  });
+  }
 }
 
 function reviewFollowupIssueText(item) {
@@ -8966,6 +9179,7 @@ async function openReviewConversation(sessionId) {
   reviewConversationState.activeTarget = reviewConversationState.activeTarget || snapshot.task_results?.[0]?.target_language || "";
   renderReviewConversationList();
   renderReviewConversationSnapshot();
+  await refreshReviewLearningStatus();
   connectReviewConversationEvents(sessionId);
 }
 
@@ -11710,16 +11924,25 @@ $('reviewFeedbackFileInput').addEventListener('change', async () => {
   const sessionId = reviewConversationState.currentId;
   $('reviewFeedbackUploadButton').disabled = true;
   $('reviewConversationHint').textContent = '正在导入反馈…';
+  showReviewLearningProgress('uploading');
   try {
     const form = new FormData(); form.append('file', file);
     const response = await fetch(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/feedback-file`, {method:'POST', body:form});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '反馈导入失败');
     showFeedbackResult(data, sessionId, data.task_id);
+    showReviewLearningProgress(data.event_id ? 'queued' : '');
     await refreshCurrentReviewConversation();
     await refreshReviewLearningStatus();
-  } catch (e) { showReviewConversationError(e); }
+  } catch (e) { showReviewLearningProgress(''); showReviewConversationError(e); }
   finally { $('reviewFeedbackUploadButton').disabled = false; $('reviewFeedbackFileInput').value = ''; }
+});
+$('reviewMemoryButton').addEventListener('click', () => openReviewMemoryDialog().catch(showReviewConversationError));
+$('saveReviewMemoryButton').addEventListener('click', () => saveReviewMemory().catch(showReviewConversationError));
+$('closeReviewMemoryButton').addEventListener('click', closeReviewMemoryDialog);
+$('cancelReviewMemoryButton').addEventListener('click', closeReviewMemoryDialog);
+$('reviewMemoryOverlay').addEventListener('click', event => {
+  if (event.target === $('reviewMemoryOverlay')) closeReviewMemoryDialog();
 });
 setInterval(() => { if (!document.hidden) refreshReviewLearningStatus().catch(() => {}); }, 4000);
 $("reviewTermBaseChip").addEventListener("click", toggleReviewTermBasePopover);

@@ -89,6 +89,42 @@ class ReviewLearningTests(unittest.TestCase):
         text=learning.memory_prompt({'rules':[{'text':'active norm','active':True},{'text':'candidate norm','active':False}]})
         self.assertIn('active norm',text); self.assertNotIn('candidate norm',text)
 
+    def test_memory_editor_api_preserves_weights_and_rejects_stale_save(self):
+        rules = [
+            {'id':'active','text':'使用中的规范','weight':2.5,'active':True},
+            {'id':'candidate','text':'候补规范','weight':1.2,'active':False},
+        ]
+        with db.get_connection() as conn:
+            conn.execute('INSERT INTO review_memory VALUES (?, ?, ?, ?)',
+                         (self.session, 3, db.dumps_json(rules), 'now'))
+        url=f'/api/ai-review/conversations/{self.session}/memory'
+        loaded=self.client.get(url)
+        self.assertEqual(loaded.status_code,200)
+        self.assertEqual(loaded.json()['active_count'],1)
+        self.assertEqual(loaded.json()['candidate_count'],1)
+        payload={'version':3,'rules':[{'id':'active','text':'修改后的使用规范'},
+                                      {'id':'candidate','text':'修改后的候补规范'}]}
+        saved=self.client.put(url,json=payload)
+        self.assertEqual(saved.status_code,200)
+        self.assertEqual(saved.json()['version'],4)
+        self.assertEqual([rule['weight'] for rule in saved.json()['rules']],[2.5,1.2])
+        self.assertEqual([rule['active'] for rule in saved.json()['rules']],[True,False])
+        stale=self.client.put(url,json=payload)
+        self.assertEqual(stale.status_code,400)
+        self.assertIn('重新打开',stale.json()['detail'])
+
+    def test_memory_editor_rejects_missing_or_duplicate_rules(self):
+        rules=[{'id':'a','text':'A','weight':1.0,'active':True},
+               {'id':'b','text':'B','weight':1.0,'active':False}]
+        with db.get_connection() as conn:
+            conn.execute('INSERT INTO review_memory VALUES (?, ?, ?, ?)',
+                         (self.session, 1, db.dumps_json(rules), 'now'))
+        url=f'/api/ai-review/conversations/{self.session}/memory'
+        missing=self.client.put(url,json={'version':1,'rules':[{'id':'a','text':'A'}]})
+        self.assertEqual(missing.status_code,400)
+        duplicate=self.client.put(url,json={'version':1,'rules':[{'id':'a','text':'same'},{'id':'b','text':'same'}]})
+        self.assertEqual(duplicate.status_code,400)
+
     def test_learning_retry_applies_weight_once(self):
         event=self.feedback()
         with patch('term_extractor_app.ai_review.shared_provider.followup_chat',return_value='invalid'):
