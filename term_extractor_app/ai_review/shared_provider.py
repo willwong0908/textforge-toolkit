@@ -299,12 +299,18 @@ def followup_chat(
         try:
             request = LLMRequest(
                 task_id=task_id,
-                task_type="ai_review_followup_chat",
+                task_type="ai_review_memory" if task_id.startswith('memory_') else "ai_review_followup_chat",
                 prompt=messages[-1]["content"] if messages else "",
                 messages=messages,
                 metadata={"enable_thinking": bool(enable_thinking)},
             )
-            response = await adapter.send_prompt(request)
+            if task_id.startswith('memory_'):
+                try:
+                    response = await asyncio.wait_for(adapter.send_prompt(request), timeout=max(30, min(600, provider.timeout_seconds)))
+                except asyncio.TimeoutError as exc:
+                    raise SharedProviderError('自主学习请求超时，人工反馈已保留，可重试') from exc
+            else:
+                response = await adapter.send_prompt(request)
         finally:
             await adapter.close()
         if not response.success:

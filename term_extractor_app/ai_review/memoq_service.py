@@ -11,6 +11,7 @@ import base64
 import ctypes
 import ctypes.wintypes as wintypes
 import json
+import hashlib
 import threading
 import time
 from typing import Any
@@ -154,14 +155,16 @@ class MemoQClient:
             languages = item.get("Languages") or item.get("languages") or []
             if isinstance(languages, str):
                 languages = [languages]
-            result.append({"id": guid, "name": name, "project": str(item.get("Project") or item.get("ProjectName") or ""), "languages": [str(x) for x in languages if x]})
+            result.append({"id": guid, "name": name, "project": str(item.get("Project") or item.get("ProjectName") or ""), "languages": [str(x) for x in languages if x],
+                           "revision": hashlib.sha256(json.dumps(item, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()})
         return result
 
     def lookup(self, termbase_ids: list[str], source_language: str, target_language: str, segments: list[str]) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
         for termbase_id in termbase_ids:
-            data = self.request("POST", f"/tbs/{termbase_id}/lookupterms", json={"SourceLanguage": source_language, "TargetLanguage": target_language, "Segments": [f"<seg>{_xml_escape(x)}</seg>" for x in segments[:32]]})
-            _collect_matches(data, matches)
+            for offset in range(0, len(segments), 32):
+                data = self.request("POST", f"/tbs/{termbase_id}/lookupterms", json={"SourceLanguage": source_language, "TargetLanguage": target_language, "Segments": [f"<seg>{_xml_escape(x)}</seg>" for x in segments[offset:offset + 32]]})
+                _collect_matches(data, matches)
         return matches
 
 
@@ -211,6 +214,25 @@ def lookup_terms(termbase_ids: list[str], source_language: str, target_language:
     client = MemoQClient(credentials)
     try:
         return client.lookup([str(x) for x in termbase_ids if str(x).strip()], _language_code(source_language), _language_code(target_language), segments)
+    finally:
+        client.close()
+
+
+def lookup_terms_snapshot(termbase_ids: list[str], source_language: str, target_language: str,
+                          segments: list[str]) -> tuple[list[dict[str, Any]], str]:
+    """Fetch live library metadata and matched content in one authenticated client."""
+    credentials = _load_credentials()
+    if not credentials:
+        raise MemoQError('尚未绑定 memoQ 账号')
+    client = MemoQClient(credentials)
+    try:
+        selected = set(termbase_ids)
+        resources = {r['id']: r['revision'] for r in client.termbases() if r['id'] in selected}
+        if set(resources) != selected:
+            raise MemoQError('部分术语库不存在或无访问权限')
+        revision = hashlib.sha256(json.dumps(resources, sort_keys=True).encode()).hexdigest()
+        pairs = client.lookup(sorted(selected), _language_code(source_language), _language_code(target_language), segments)
+        return pairs, revision
     finally:
         client.close()
 

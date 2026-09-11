@@ -485,6 +485,8 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_review_term_entries_base ON review_term_entries(term_base_id, row_number)"
         )
+        from .learning_service import init_learning_tables
+        init_learning_tables(conn)
 
 
 def dumps_json(data: Any) -> str:

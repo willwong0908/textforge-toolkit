@@ -3074,6 +3074,8 @@ INDEX_HTML = """<!doctype html>
                   <button id="reviewTargetLanguageChip" class="composer-chip" type="button">目标语言：自动</button>
                   <button id="reviewTermBaseChip" class="composer-chip review-term-base-chip" type="button" title="选择术语表">术语表</button>
                   <button id="reviewUploadChip" class="composer-chip" type="button">＋ 文件</button>
+                  <button id="reviewFeedbackUploadButton" class="composer-chip" type="button">上传优化文件</button>
+                  <input id="reviewFeedbackFileInput" type="file" accept=".xlsx" hidden />
                   <input id="reviewConversationFileInput" type="file" accept=".xlsx,.xlsm,.xlf,.xliff,.csv,.tsv,.txt,.md,.docx,.pptx,.pdf,.json,.xml" multiple hidden />
                   <input id="reviewTermBaseFileInput" type="file" accept=".xlsx,.xlsm" hidden />
                 </div>
@@ -3098,6 +3100,7 @@ INDEX_HTML = """<!doctype html>
                 <div id="reviewTermBaseOptions" class="review-term-base-options"></div>
               </div>
               <span id="reviewConversationHint" class="hint"></span>
+              <div id="reviewLearningStatus" class="hint" aria-live="polite"></div>
             </div>
           </div>
         </div>
@@ -3201,6 +3204,8 @@ INDEX_HTML = """<!doctype html>
               <label>思考强度<select id="reviewReasoningEffort"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
               <label>单包正文预算<input id="reviewAiLimit" type="number" min="200" value="1500" /></label>
               <label>单包条目上限<input id="reviewMaxItems" type="number" min="1" max="500" value="20" /></label>
+              <label class="check-line"><input id="reviewCacheEnabled" type="checkbox" checked /><span>审校缓存</span></label>
+              <label class="check-line"><input id="reviewLearningEnabled" type="checkbox" checked /><span>自主学习</span></label>
             </div>
             <div class="actions">
               <button id="saveReviewAgentSettingsButton" class="primary" type="button">保存设置</button>
@@ -3258,11 +3263,15 @@ INDEX_HTML = """<!doctype html>
           <h3>问题详情</h3>
           <p id="reviewDetailSummary">暂无问题条目</p>
         </div>
-        <button id="closeReviewDetailButton" class="modal-close" type="button" aria-label="关闭">×</button>
+        <div class="actions compact-actions">
+          <button id="confirmReviewFeedbackButton" class="primary" type="button">确定</button>
+          <button id="closeReviewDetailButton" class="modal-close" type="button" aria-label="关闭">×</button>
+        </div>
       </div>
       <div id="reviewDetailGroups" class="review-detail-wrap">
         <div class="empty-cell">暂无问题条目</div>
       </div>
+      <span id="reviewFeedbackHint" class="hint" aria-live="polite"></span>
     </div>
   </div>
   <div id="reviewFollowupOverlay" class="modal-overlay" hidden>
@@ -4276,6 +4285,10 @@ button:disabled { opacity: .58; cursor: not-allowed; }
   border-radius: 999px;
   font-size: 13px;
 }
+.review-feedback-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.review-feedback-actions .review-followup-inline-button { position: static; }
+.review-feedback-actions input { flex: 1 1 150px; width: 150px; min-width: 0; }
+.review-detail-table td.review-detail-issue-cell { padding-bottom: 12px; }
 .review-followup-modal {
   width: min(1180px, calc(100vw - 36px));
   height: min(820px, calc(100vh - 36px));
@@ -6413,6 +6426,10 @@ let aiReviewExcelMappingState = {};
 let aiReviewActiveSheetName = "";
 let aiReviewMappingTemplateIssues = [];
 let aiReviewIssueResults = [];
+let reviewFeedbackDraft = new Map();
+let reviewFeedbackTaskId = '';
+let reviewFeedbackSessionId = '';
+let reviewFeedbackSaving = false;
 let aiReviewFollowupState = { taskId: "", resultId: "", item: null, messages: [] };
 let reviewConversationState = {
   sessions: [],
@@ -7555,7 +7572,7 @@ function renderAiReviewProgress(task = {}) {
   const isActive = ["pending", "running"].includes(String(task.status || ""));
   $("reviewProgress").textContent = String(task.status_label || task.status || "尚未开始");
   $("reviewProgressPercent").textContent = total > 0 ? `${percent}%` : isActive ? "0%" : "未开始";
-  $("reviewProgressCount").textContent = `${safeCurrent} / ${total}`;
+  $("reviewProgressCount").textContent = `${safeCurrent} / ${total}${Number(task.cached_count || 0) ? ` · 缓存命中 ${Number(task.cached_count)} 条` : ''}`;
   $("reviewFailedCount").textContent = Number(task.failed_count || 0);
   $("reviewRequestedCount").textContent = Number(task.requested_count || 0);
   $("reviewProgressBar").style.width = total > 0 ? `${percent}%` : "0";
@@ -8487,7 +8504,33 @@ function renderReviewDetailRows(task, results) {
           followupButton.addEventListener("click", () => openReviewFollowupDialog(item.id).catch((error) => {
             $("reviewFollowupHint").textContent = error.message;
           }));
-          td.appendChild(followupButton);
+          const feedbackActions = document.createElement('div');
+          feedbackActions.className = 'review-feedback-actions';
+          feedbackActions.appendChild(followupButton);
+          td.appendChild(feedbackActions);
+          if (item.has_issue && item.status !== 'failed') {
+            const ignore = document.createElement('button');
+            ignore.type = 'button';
+            ignore.className = 'secondary';
+            ignore.textContent = '忽略';
+            ignore.setAttribute('aria-pressed', 'false');
+            const reason = document.createElement('input');
+            reason.type = 'text';
+            reason.placeholder = '忽略原因（可选）';
+            reason.setAttribute('aria-label', '忽略原因');
+            const draft = reviewFeedbackDraft.get(item.id) || {ignored:false, reason:''};
+            reason.value = draft.reason;
+            const update = () => {
+              tr.style.opacity = draft.ignored ? '0.45' : '';
+              ignore.textContent = draft.ignored ? '取消忽略' : '忽略';
+              ignore.setAttribute('aria-pressed', String(draft.ignored));
+              reviewFeedbackDraft.set(item.id, draft);
+            };
+            ignore.addEventListener('click', () => { if (!reviewFeedbackSaving) { draft.ignored = !draft.ignored; update(); } });
+            reason.addEventListener('input', () => { draft.reason = reason.value; update(); });
+            update();
+            feedbackActions.append(ignore, reason);
+          }
         }
         tr.appendChild(td);
       });
@@ -8505,13 +8548,90 @@ async function openReviewDetailDialog() {
     $("reviewTaskHint").textContent = "请先开始审校任务";
     return;
   }
+  reviewFeedbackTaskId = aiReviewTaskId;
+  reviewFeedbackSessionId = reviewConversationState.currentId;
+  reviewFeedbackDraft.clear();
+  $('reviewFeedbackHint').textContent = '';
   const data = await api(`/api/ai-review/tasks/${encodeURIComponent(aiReviewTaskId)}/issue-results`);
   renderReviewDetailRows(data.task || aiReviewCurrentTask || {}, data.results || []);
   $("reviewDetailOverlay").hidden = false;
 }
 
 function closeReviewDetailDialog() {
+  if (reviewFeedbackSaving) return;
+  reviewFeedbackDraft.clear();
   $("reviewDetailOverlay").hidden = true;
+}
+
+async function confirmReviewFeedback() {
+  if (reviewFeedbackSaving) return;
+  const entries = [...reviewFeedbackDraft.entries()].filter(([, d]) => d.ignored)
+    .map(([result_id, d]) => ({result_id, decision:'disagree', reason:d.reason}));
+  if (!entries.length) { closeReviewDetailDialog(); return; }
+  reviewFeedbackSaving = true;
+  $('confirmReviewFeedbackButton').disabled = true;
+  $('closeReviewDetailButton').disabled = true;
+  try {
+    const result = await api(`/api/ai-review/conversations/${encodeURIComponent(reviewFeedbackSessionId)}/feedback`,
+      {method:'POST', body:JSON.stringify({task_id:reviewFeedbackTaskId, entries})});
+    reviewFeedbackSaving = false;
+    closeReviewDetailDialog();
+    showFeedbackResult(result, reviewFeedbackSessionId, reviewFeedbackTaskId);
+    await refreshCurrentReviewConversation();
+    await refreshReviewLearningStatus();
+  } catch (error) { $('reviewFeedbackHint').textContent = error.message; }
+  finally {
+    reviewFeedbackSaving = false;
+    $('confirmReviewFeedbackButton').disabled = false;
+    $('closeReviewDetailButton').disabled = false;
+  }
+}
+
+function showFeedbackResult(result, sessionId, taskId) {
+  if (sessionId !== reviewConversationState.currentId) return;
+  const hint = $('reviewConversationHint');
+  hint.textContent = result.export_error || `已更新 ${result.changed || 0} 条反馈${result.event_id ? '，正在自主学习' : ''}`;
+  if (result.export_error) {
+    const retry = document.createElement('button');
+    retry.type = 'button'; retry.textContent = '重试导出';
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      try {
+        const exported = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/feedback-export/${encodeURIComponent(taskId)}`, {method:'POST'});
+        showFeedbackResult(exported, sessionId, taskId);
+        await refreshCurrentReviewConversation();
+      } catch (e) { hint.textContent = e.message; }
+      finally { retry.disabled = false; }
+    });
+    hint.appendChild(retry);
+  }
+}
+
+async function refreshReviewLearningStatus() {
+  const sessionId = reviewConversationState.currentId;
+  if (!sessionId) { $('reviewLearningStatus').textContent = ''; return; }
+  const status = await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/learning`);
+  if (sessionId !== reviewConversationState.currentId) return;
+  const box = $('reviewLearningStatus');
+  box.textContent = status.version ? `会话记忆 v${status.version} · ${status.active_count} 条规范` : '';
+  (status.events || []).filter(e => e.status !== 'completed').forEach(event => {
+    const line = document.createElement('div');
+    line.textContent = event.status === 'failed' ? `自主学习失败：${event.error}` : '自主学习中…';
+    if (event.status === 'failed') {
+      const retry = document.createElement('button');
+      retry.type = 'button'; retry.textContent = '重试学习';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try {
+          await api(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/learning/${encodeURIComponent(event.id)}/retry`, {method:'POST'});
+          await refreshReviewLearningStatus();
+        } catch (e) { line.textContent = e.message; }
+        finally { retry.disabled = false; }
+      });
+      line.appendChild(retry);
+    }
+    box.appendChild(line);
+  });
 }
 
 function reviewFollowupIssueText(item) {
@@ -9870,6 +9990,9 @@ async function copyToClipboard(text) {
 
 async function loadSettings() {
   const data = await api("/api/settings");
+  const learningOptions = await api('/api/ai-review/conversations/learning/options');
+  $('reviewCacheEnabled').checked = learningOptions.cache_enabled;
+  $('reviewLearningEnabled').checked = learningOptions.learning_enabled;
   currentProviderName = data.provider_name || "DeepSeek";
   renderModelOptions([], data.model_name || "");
   $("apiKey").value = data.api_key || "";
@@ -9978,6 +10101,8 @@ function reviewSettingsPayload() {
 }
 
 async function saveReviewSettings() {
+  await api('/api/ai-review/conversations/learning/options', {method:'POST', body:JSON.stringify({
+    cache_enabled:$('reviewCacheEnabled').checked, learning_enabled:$('reviewLearningEnabled').checked})});
   await api("/api/settings", { method: "POST", body: JSON.stringify(reviewSettingsPayload()) });
   $("reviewSettingsHint").textContent = "审校设置已保存";
   setTimeout(() => ($("reviewSettingsHint").textContent = ""), 1800);
@@ -11574,6 +11699,29 @@ document.querySelectorAll('input[name="reviewAttachmentMappingMode"]').forEach((
   input.addEventListener("change", updateReviewAttachmentMappingControls);
 });
 $("reviewUploadChip").addEventListener("click", () => chooseReviewConversationFiles().catch(showReviewConversationError));
+$('confirmReviewFeedbackButton').addEventListener('click', confirmReviewFeedback);
+$('reviewFeedbackUploadButton').addEventListener('click', () => {
+  if (!reviewConversationState.currentId) { showReviewConversationError(new Error('请先选择审校会话')); return; }
+  $('reviewFeedbackFileInput').click();
+});
+$('reviewFeedbackFileInput').addEventListener('change', async () => {
+  const file = $('reviewFeedbackFileInput').files[0];
+  if (!file) return;
+  const sessionId = reviewConversationState.currentId;
+  $('reviewFeedbackUploadButton').disabled = true;
+  $('reviewConversationHint').textContent = '正在导入反馈…';
+  try {
+    const form = new FormData(); form.append('file', file);
+    const response = await fetch(`/api/ai-review/conversations/${encodeURIComponent(sessionId)}/feedback-file`, {method:'POST', body:form});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '反馈导入失败');
+    showFeedbackResult(data, sessionId, data.task_id);
+    await refreshCurrentReviewConversation();
+    await refreshReviewLearningStatus();
+  } catch (e) { showReviewConversationError(e); }
+  finally { $('reviewFeedbackUploadButton').disabled = false; $('reviewFeedbackFileInput').value = ''; }
+});
+setInterval(() => { if (!document.hidden) refreshReviewLearningStatus().catch(() => {}); }, 4000);
 $("reviewTermBaseChip").addEventListener("click", toggleReviewTermBasePopover);
 $("reviewTermBaseSearch").addEventListener("input", renderReviewTermBaseOptions);
 $("uploadReviewTermBaseButton").addEventListener("click", () => {

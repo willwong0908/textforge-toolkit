@@ -162,6 +162,7 @@ def delete_session(session_id: str) -> None:
             conn.execute("DELETE FROM review_request_states WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM review_tasks WHERE id = ?", (task_id,))
         for table in (
+            "review_session_cache", "review_feedback", "review_learning_events", "review_memory",
             "review_session_events", "review_session_tasks", "workspace_questions", "workspace_runs",
             "review_messages", "review_attachments",
         ):

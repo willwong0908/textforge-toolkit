@@ -8,6 +8,9 @@ from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import FormulaRule
+import uuid
 
 from .config import OUTPUTS_DIR, ensure_directories
 from .database import get_connection
@@ -31,7 +34,7 @@ def generate_review_excel(task_id: str) -> Path:
     task = _fetch_task(task_id)
     config = task["config"]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = OUTPUTS_DIR / f"review_result_{timestamp}.xlsx"
+    output_path = OUTPUTS_DIR / f"review_result_{timestamp}_{task_id[:8]}_{uuid.uuid4().hex[:6]}.xlsx"
 
     workbook = Workbook(write_only=True)
     sheet = workbook.create_sheet("审校结果")
@@ -44,9 +47,27 @@ def generate_review_excel(task_id: str) -> Path:
         headers = ["文件名", "sheet / segment ID", "原始行号", "原文", "译文", "修改建议", *review_type_keys]
     else:
         review_type_keys = []
-        headers = NORMAL_HEADERS
+        headers = list(NORMAL_HEADERS)
     if enable_forbidden and config.get("mode") != "forbidden_only":
         headers.append("禁用词检查情况")
+    feedback_enabled = config.get('mode', 'normal') == 'normal' and bool(task.get('session_id'))
+    if feedback_enabled:
+        headers.extend(['agree/disagree', 'reason', '_result_id'])
+        sheet.column_dimensions[get_column_letter(len(headers))].hidden = True
+        decision_column = get_column_letter(len(headers) - 2)
+        validation = DataValidation(type='list', formula1='"agree,disagree"', allow_blank=True)
+        validation.errorTitle = '无效选项'
+        validation.error = '请选择 agree 或 disagree'
+        validation.showErrorMessage = True
+        validation.add(f'{decision_column}2:{decision_column}1048576')
+        sheet.data_validations.append(validation)
+        for choice, color in [('agree', 'D9EAD3'), ('disagree', 'D9D9D9')]:
+            sheet.conditional_formatting.add(f'A2:{get_column_letter(len(headers) - 1)}1048576',
+                FormulaRule(formula=[f'${decision_column}2="{choice}"'], fill=PatternFill('solid', fgColor=color)))
+        meta = workbook.create_sheet('_review_meta')
+        meta.sheet_state = 'veryHidden'
+        for key, value in [('version', '1'), ('session_id', task['session_id']), ('task_id', task_id)]:
+            meta.append([key, value])
     _configure_sheet(sheet, headers)
 
     for row in _iter_rows(task_id):
@@ -91,6 +112,8 @@ def generate_review_excel(task_id: str) -> Path:
         ]
         if enable_forbidden:
             values.append(forbidden)
+        if feedback_enabled:
+            values.extend([row['feedback_decision'] or '', row['feedback_reason'] or '', row['result_id']])
         sheet.append(_styled_row(sheet, values))
 
     workbook.save(output_path)
@@ -102,13 +125,15 @@ def _iter_rows(task_id: str):
     with get_connection() as conn:
         cursor = conn.execute(
             """
-            SELECT r.status, r.has_issue, r.issue_type, r.issue, r.suggestion,
+            SELECT r.id AS result_id, r.status, r.has_issue, r.issue_type, r.issue, r.suggestion,
+                   fb.decision AS feedback_decision, fb.reason AS feedback_reason,
                    r.directional_checks_json, r.error_message,
                    COALESCE(f.matched_words, '') AS matched_words,
                    i.source_file, i.sheet_name, i.segment_id, i.row_number,
                    i.source_text, i.target_text
             FROM review_results r
             JOIN file_items i ON i.id = r.item_id
+            LEFT JOIN review_feedback fb ON fb.result_id = r.id
             LEFT JOIN forbidden_results f ON f.task_id = r.task_id AND f.item_id = r.item_id
             WHERE r.task_id = ?
             ORDER BY i.item_order ASC
@@ -122,10 +147,10 @@ def _fetch_task(task_id: str) -> dict[str, Any]:
     from .database import loads_json
 
     with get_connection() as conn:
-        row = conn.execute("SELECT config_json FROM review_tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute("SELECT config_json, session_id FROM review_tasks WHERE id = ?", (task_id,)).fetchone()
     if not row:
         return {"config": {}}
-    return {"config": loads_json(row["config_json"], {})}
+    return {"config": loads_json(row["config_json"], {}), "session_id": row['session_id']}
 
 
 def _loads_checks(text: str) -> dict[str, str]:
@@ -145,14 +170,13 @@ def _configure_sheet(sheet: Any, headers: list[str]) -> None:
         cell.font = header_font
         cell.alignment = Alignment(vertical="top", wrap_text=True)
         header_cells.append(cell)
-    sheet.append(header_cells)
-
     base_widths = [22, 18, 10, 42, 42]
     widths = [*base_widths, *([24] * max(0, len(headers) - len(base_widths)))]
     for index, width in enumerate(widths[: len(headers)], start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+    sheet.append(header_cells)
 
 
 def _styled_row(sheet: Any, values: list[Any]) -> list[WriteOnlyCell]:
@@ -164,5 +188,7 @@ def _styled_row(sheet: Any, values: list[Any]) -> list[WriteOnlyCell]:
 
 def _styled_cell(sheet: Any, value: Any) -> WriteOnlyCell:
     cell = WriteOnlyCell(sheet, value=value)
+    if isinstance(value, str):
+        cell.data_type = 's'
     cell.alignment = Alignment(vertical="top", wrap_text=True)
     return cell

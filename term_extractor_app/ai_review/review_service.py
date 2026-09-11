@@ -17,7 +17,8 @@ from .prompt_service import get_prompt_template
 from .shared_provider import SharedProviderError, followup_chat, get_shared_ai_settings
 from .session_store import emit_event
 from .term_base_service import get_term_base, match_terms
-from .memoq_service import lookup_terms, MemoQError
+from .memoq_service import lookup_terms_snapshot, MemoQError
+from .learning_service import cached_results, cache_results, memory_snapshot, memory_prompt, options
 from ..models import LLMRequest, LLMResponse
 from ..logging_utils import LOGGER_NAME, configure_file_logger
 from ..providers import ProviderRegistry
@@ -202,6 +203,7 @@ def create_review_task(
             "memoq_term_base_ids": [str(x) for x in (memoq_term_base_ids or []) if str(x).strip()],
             "memoq_term_pairs": [],
         }
+    config["memory_snapshot"] = memory_snapshot(str(session_id or "")) if options()['learning_enabled'] else {}
     with get_connection() as conn:
         conn.execute(
             """
@@ -237,6 +239,9 @@ def get_review_task(task_id: str) -> dict[str, Any] | None:
 def recover_interrupted_review_tasks() -> int:
     """Close tasks whose daemon worker disappeared during a previous app process."""
     with get_connection() as conn:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_learning_events'").fetchone():
+            conn.execute("UPDATE review_learning_events SET status='failed', error='应用退出导致学习中断，请重试' "
+                         "WHERE status IN ('queued', 'running')")
         rows = conn.execute(
             "SELECT id FROM review_tasks WHERE status IN ('pending', 'running', 'recovering')"
         ).fetchall()
@@ -301,7 +306,13 @@ def get_review_results(task_id: str, limit: int | None = 20) -> list[dict[str, A
             """,
             params,
         ).fetchall()
-    return [_result_to_dict(row) for row in rows]
+    results = [_result_to_dict(row) for row in rows]
+    with get_connection() as conn:
+        feedback = {r['result_id']: dict(r) for r in conn.execute(
+            'SELECT result_id, decision, reason FROM review_feedback WHERE task_id=?', (task_id,)).fetchall()}
+    for result in results:
+        result['feedback'] = feedback.get(result['id'])
+    return results
 
 
 def get_review_issue_results(task_id: str) -> list[dict[str, Any]]:
@@ -413,7 +424,13 @@ def get_review_result_detail(task_id: str, result_id: str) -> dict[str, Any] | N
             """,
             (task_id, result_id),
         ).fetchone()
-    return _result_to_dict(row) if row else None
+    if not row:
+        return None
+    result = _result_to_dict(row)
+    with get_connection() as conn:
+        feedback = conn.execute('SELECT decision, reason FROM review_feedback WHERE result_id=?', (result_id,)).fetchone()
+    result['feedback'] = dict(feedback) if feedback else None
+    return result
 
 
 def _review_result_has_issue(item: dict[str, Any], config: dict[str, Any]) -> bool:
@@ -566,12 +583,13 @@ def _run_review_task_impl(task_id: str) -> None:
         memoq_ids = [str(x) for x in (config.get("memoq_term_base_ids") or []) if str(x).strip()]
         if memoq_ids:
             try:
-                pairs = lookup_terms(
+                pairs, remote_revision = lookup_terms_snapshot(
                     memoq_ids,
                     str(config.get("source_language") or "auto"),
                     str(config.get("target_language") or "auto"),
                     [str(item.get("source_text") or "") for item in items if str(item.get("source_text") or "").strip()],
                 )
+                config['memoq_revision'] = remote_revision
                 unique: list[dict[str, Any]] = []
                 seen: set[str] = set()
                 for pair in pairs:
@@ -582,6 +600,7 @@ def _run_review_task_impl(task_id: str) -> None:
                 config["memoq_term_pairs"] = unique
                 _add_log(task_id, "info", f"memoQ 术语库已匹配 {len(unique)} 个术语对，将按批次提供给模型。")
             except MemoQError as exc:
+                config['term_lookup_failed'] = True
                 _add_log(task_id, "warning", f"memoQ 术语提取失败，继续执行但不应用远程术语库：{exc}")
         term_base_id = str(config.get("term_base_id") or "")
         term_match_count = 0
@@ -616,13 +635,18 @@ def _run_review_task_impl(task_id: str) -> None:
             config["user_prompt"],
             config.get("source_language", ""),
             config.get("target_language", ""),
-            str(config.get("term_base_hash") or ""),
+            dumps_json({"local": config.get("term_base_hash", ""),
+                        "remote_ids": sorted(memoq_ids),
+                        "remote_revision": config.get('memoq_revision', ''),
+                        "term_instruction": TERM_REVIEW_INSTRUCTION,
+                        "reasoning_effort": config.get("reasoning_effort", "low")}),
         )
         directional_signature = _directional_signature(config)
         enable_thinking = bool(config.get("enable_thinking", False))
         existing_completed_ids = _get_completed_review_item_ids(task_id)
         request_items = []
         cached_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        keyed_items = []
         for item in items:
             if item["id"] in existing_completed_ids:
                 continue
@@ -630,14 +654,17 @@ def _run_review_task_impl(task_id: str) -> None:
                 item["source_text"],
                 item["target_text"],
                 _item_info(item),
-                _item_term_pairs(item),
+                _build_request_payload([item], config).get('term_pairs', []),
                 model,
                 prompt_signature,
                 directional_signature,
                 enable_thinking,
             )
             item_with_cache = {**item, "cache_key": cache_key}
-            cached = _get_cached_result(cache_key)
+            keyed_items.append(item_with_cache)
+        cache = {} if config.get('term_lookup_failed') else cached_results(str(config.get("session_id") or ""), [item["cache_key"] for item in keyed_items])
+        for item_with_cache in keyed_items:
+            cached = cache.get(item_with_cache["cache_key"])
             if cached is None:
                 request_items.append(item_with_cache)
             else:
@@ -646,6 +673,7 @@ def _run_review_task_impl(task_id: str) -> None:
         if cached_pairs:
             _save_review_results_bulk(task_id, cached_pairs, status="cached")
         cached_count = len(cached_pairs)
+        _add_log(task_id, "info", f"Session 缓存命中 {cached_count} 条，待请求 {len(request_items)} 条")
         initial_completed = len(existing_completed_ids) + cached_count
         _update_task(task_id, cached_count=cached_count, completed_count=initial_completed)
 
@@ -758,7 +786,7 @@ async def _run_review_packages(
                 task_type="candidate_review_batch",
                 prompt=user_prompt,
                 messages=[
-                    {"role": "system", "content": config["system_prompt"]},
+                    {"role": "system", "content": memory_prompt(config.get("memory_snapshot", {})) + config["system_prompt"]},
                     {"role": "user", "content": user_prompt},
                 ],
                 metadata=metadata,
@@ -830,20 +858,11 @@ async def _run_review_packages(
                     )
                 else:
                     result = _normalize_result(result_by_id.get(item["id"]), item["id"])
+                result['_term_reference'] = _build_request_payload([item], config).get('term_pairs', [])
                 saved_results.append((item, result))
             _save_review_results_bulk(task_id, saved_results)
-            _cache_review_results_bulk(
-                saved_results,
-                model=model,
-                prompt_signature=_prompt_signature(
-                    config["system_prompt"],
-                    config["user_prompt"],
-                    str(config.get("source_language") or ""),
-                    str(config.get("target_language") or ""),
-                    str(config.get("term_base_hash") or ""),
-                ),
-                directional_signature=_directional_signature(config),
-            )
+            if not config.get('term_lookup_failed'):
+                cache_results(str(config.get('session_id') or ''), saved_results)
             _add_log(task_id, "info", f"第 {package_index} 包校验通过：{len(parsed_items)} 条")
         else:
             message = str(response.error or "请求失败")
@@ -1131,6 +1150,9 @@ def _save_review_results_bulk(
         return
     now = utc_now()
     with get_connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if not conn.execute('SELECT 1 FROM review_tasks WHERE id=?', (task_id,)).fetchone():
+            return
         conn.executemany(
             "DELETE FROM review_results WHERE task_id = ? AND item_id = ? AND status = 'failed'",
             [(task_id, item["id"]) for item, _result in pairs],
@@ -1284,9 +1306,16 @@ def _build_request_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"items": [_payload_item(item) for item in package]}
     term_pairs = _package_term_pairs(package)
+    term_keys = {_term_pair_key(pair) for pair in term_pairs}
+    sources = [str(item.get('source_text') or '').casefold() for item in package]
     for pair in config.get("memoq_term_pairs") or []:
-        if isinstance(pair, dict) and _term_pair_key(pair) not in {_term_pair_key(x) for x in term_pairs}:
+        if not isinstance(pair, dict):
+            continue
+        source = str(pair.get('source') or '').casefold()
+        key = _term_pair_key(pair)
+        if source and any(source in text for text in sources) and key not in term_keys:
             term_pairs.append(pair)
+            term_keys.add(key)
     if term_pairs:
         payload["term_pairs"] = term_pairs
     if config.get("mode") == "directional":
@@ -1669,9 +1698,9 @@ def _add_log(task_id: str, level: str, message: str) -> None:
         conn.execute(
             """
             INSERT INTO review_task_logs (task_id, level, message, created_at)
-            VALUES (?, ?, ?, ?)
+            SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM review_tasks WHERE id=?)
             """,
-            (task_id, level, message, timestamp),
+            (task_id, level, message, timestamp, task_id),
         )
     logger = logging.getLogger(LOGGER_NAME)
     if not logger.handlers:

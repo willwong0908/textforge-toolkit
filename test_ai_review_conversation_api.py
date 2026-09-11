@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import json
 import time
+import threading
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -58,6 +59,7 @@ def _workspace_response(messages: list[dict[str, str]], on_delta=None) -> str:
 
 class ConversationApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.initial_threads = set(threading.enumerate())
         workspace_prompts.clear()
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
@@ -82,6 +84,10 @@ class ConversationApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
+        for thread in set(threading.enumerate()) - self.initial_threads:
+            if getattr(thread, '_target', None) is workspace_service._run_inspection:
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), 'Workspace worker must stop before removing its test database')
         for item in reversed(self.patches):
             item.stop()
         self.temp.cleanup()

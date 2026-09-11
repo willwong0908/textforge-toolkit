@@ -32,6 +32,8 @@ from .workflow_service import get_session_task_results, start_session_review
 from .workspace_service import submit_workspace_inspection
 from .term_base_service import get_term_base
 from ..telemetry import track_event
+from . import learning_service
+from starlette.concurrency import run_in_threadpool
 
 
 router = APIRouter(prefix="/api/ai-review/conversations", tags=["ai-review-conversations"])
@@ -45,6 +47,75 @@ class SessionCreatePayload(BaseModel):
     source_language: str = "auto"
     target_languages: list[str] = Field(default_factory=lambda: ["auto"])
     auto_start: bool = False
+
+
+class FeedbackEntry(BaseModel):
+    result_id: str
+    decision: str
+    reason: str = ''
+
+
+class FeedbackPayload(BaseModel):
+    task_id: str
+    entries: list[FeedbackEntry]
+
+
+class LearningOptions(BaseModel):
+    cache_enabled: bool = True
+    learning_enabled: bool = True
+
+
+@router.get('/learning/options')
+def get_learning_options():
+    return learning_service.options()
+
+
+@router.post('/learning/options')
+def update_learning_options(payload: LearningOptions):
+    return learning_service.save_options(payload.model_dump())
+
+
+@router.post('/{session_id}/feedback')
+def feedback(session_id: str, payload: FeedbackPayload):
+    try:
+        return learning_service.submit_feedback(session_id, payload.task_id, [e.model_dump() for e in payload.entries])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/{session_id}/feedback-file')
+async def feedback_file(session_id: str, file: UploadFile = File(...)):
+    try:
+        content = await file.read(50 * 1024 * 1024 + 1)
+        if len(content) > 50 * 1024 * 1024:
+            raise ValueError('反馈文件不能超过 50 MB')
+        return await run_in_threadpool(learning_service.import_feedback, session_id, content)
+    except Exception as exc:
+        raise HTTPException(400, '反馈导入失败：' + str(exc)) from exc
+    finally:
+        await file.close()
+
+
+@router.get('/{session_id}/learning')
+def learning(session_id: str):
+    return learning_service.learning_status(session_id)
+
+
+@router.post('/{session_id}/learning/{event_id}/retry')
+def retry_learning(session_id: str, event_id: str):
+    try:
+        learning_service.retry_learning(session_id, event_id)
+        return {'ok': True}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/{session_id}/feedback-export/{task_id}')
+def feedback_export(session_id: str, task_id: str):
+    try:
+        return learning_service.regenerate_output(session_id, task_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 class SessionMessagePayload(BaseModel):
