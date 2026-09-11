@@ -184,6 +184,36 @@ class ReviewLearningTests(unittest.TestCase):
         self.assertFalse(self.feedback()['event_id'])
         self.assertFalse(review.get_review_results('t')[0]['has_issue'])
 
+    def test_learning_request_contains_only_disagree_and_marks_rejected_advice(self):
+        learning.submit_feedback(self.session, 't', [
+            {'result_id':self.results[0]['id'], 'decision':'disagree', 'reason':'允许自然改写'},
+            {'result_id':self.results[1]['id'], 'decision':'agree', 'reason':'确实有错'},
+        ])
+        with patch('term_extractor_app.ai_review.shared_provider.followup_chat',
+                   return_value='{"triggered_ids":[],"new_rules":["结合文体判断自然改写"]}') as call:
+            learning._learning_worker(self.session)
+        payload=db.loads_json(call.call_args.kwargs['messages'][-1]['content'], {})
+        self.assertEqual(len(payload['feedback']),1)
+        evidence=payload['feedback'][0]
+        self.assertEqual(evidence['result_id'],self.results[0]['id'])
+        self.assertEqual(evidence['source_text'],'source0')
+        self.assertEqual(evidence['user_reason'],'允许自然改写')
+        self.assertEqual(evidence['user_decision'],'disagree')
+        self.assertNotIn('suggestion', evidence)
+        self.assertEqual(evidence['rejected_ai_judgment']['suggestion'],'suggestion')
+        self.assertTrue(review.get_review_results('t')[1]['has_issue'])
+        self.assertTrue(review.get_review_results('t')[2]['has_issue'])
+
+    def test_learning_prompt_handles_historical_event_without_mutating_evidence(self):
+        item={'source_text':'战旗', 'target_text':'Tactical Strategy',
+              'reason':'战旗是游戏类型', 'suggestion':'War Banner',
+              'term_reference':[{'source':'term','targets':['target']}]}
+        messages=learning.build_learning_messages({'version':0,'rules':[]},[item])
+        payload=db.loads_json(messages[-1]['content'],{})
+        self.assertEqual(payload['feedback'][0]['rejected_ai_judgment']['suggestion'],'War Banner')
+        self.assertEqual(payload['feedback'][0]['user_reason'],'战旗是游戏类型')
+        self.assertIn('term_reference', item)
+
     def test_feedback_atomic_rollback(self):
         entries=[{'result_id':self.results[0]['id'],'decision':'disagree'}, {'result_id':'missing','decision':'disagree'}]
         with self.assertRaises(ValueError): learning.submit_feedback(self.session,'t',entries)
